@@ -1,14 +1,16 @@
 """Local settings window: edit the cut options, pick a file, and run."""
 
 import json
+import subprocess
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from krackup.meshio import load_models
 from krackup.printers import DEFAULT_PRINTER, PRINTERS
-from krackup.run import krack
+from krackup.run import Stopped, krack
 
 PAGE = Path(__file__).with_name("ui_page.html").read_text(encoding="utf-8")
 CONFIG_PATH = Path.home() / ".config" / "krack-up" / "settings.json"
@@ -22,6 +24,7 @@ DEFAULTS = {
     "min_pins": 2,
     "length": 10.0,
     "tolerance": 0.1,
+    "scale": 1.0,
     "write_3mf": False,
     "browse": str(Path.home() / "Downloads"),
 }
@@ -34,6 +37,8 @@ class Job:
         self.log = []
         self.error = ""
         self.output = ""
+        self.stopped = False
+        self.cancel = threading.Event()
 
     def snapshot(self):
         with self.lock:
@@ -42,10 +47,37 @@ class Job:
                 "log": "\n".join(self.log[-400:]),
                 "error": self.error,
                 "output": self.output,
+                "stopped": self.stopped,
             }
 
 
 JOB = Job()
+_SIZE_CACHE = {}
+
+
+def model_dimensions(raw_path):
+    path = Path(str(raw_path)).expanduser()
+    if not path.is_absolute():
+        path = Path.home() / path
+    path = path.resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"No file at {path}")
+    if path.suffix.lower() not in MODEL_SUFFIXES:
+        raise ValueError("Input must be an .stl or .3mf file")
+    stamp = path.stat().st_mtime
+    key = (str(path), stamp)
+    cached = _SIZE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    parts = []
+    for name, verts, _faces in load_models(path):
+        size = verts.max(axis=0) - verts.min(axis=0)
+        parts.append({"name": name, "size": [round(float(value), 1) for value in size]})
+    parts.sort(key=lambda part: max(part["size"]), reverse=True)
+    payload = {"parts": parts}
+    _SIZE_CACHE.clear()
+    _SIZE_CACHE[key] = payload
+    return payload
 
 
 def load_settings():
@@ -132,6 +164,9 @@ def _numbers(settings):
         raise ValueError("Dowel length must be greater than 0")
     if tolerance < 0:
         raise ValueError("Clearance cannot be negative")
+    scale = float(settings.get("scale", 1))
+    if scale <= 0:
+        raise ValueError("Scale must be greater than 0")
     browse_path = str(settings.get("browse") or DEFAULTS["browse"])
     return {
         "input": str(settings.get("input", "")).strip(),
@@ -141,6 +176,7 @@ def _numbers(settings):
         "min_pins": min_pins,
         "length": length,
         "tolerance": tolerance,
+        "scale": scale,
         "write_3mf": bool(settings.get("write_3mf")),
         "browse": browse_path,
     }
@@ -160,6 +196,22 @@ def _check(settings):
     return cleaned
 
 
+def open_folder(raw_path):
+    path = Path(str(raw_path)).expanduser()
+    if not path.is_absolute():
+        path = Path.home() / path
+    path = path.resolve()
+    if not path.is_dir():
+        raise FileNotFoundError(f"No folder at {path}")
+    subprocess.Popen(
+        ["xdg-open", str(path)],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return str(path)
+
+
 def start_job(settings):
     checked = _check(settings)
     save_settings(checked)
@@ -170,6 +222,8 @@ def start_job(settings):
         JOB.log = [f"Cutting {checked['input']}"]
         JOB.error = ""
         JOB.output = ""
+        JOB.stopped = False
+        JOB.cancel.clear()
 
     def worker():
         try:
@@ -185,11 +239,17 @@ def start_job(settings):
                 tolerance=checked["tolerance"],
                 pitch=checked["pitch"],
                 min_pins=checked["min_pins"],
+                scale=checked["scale"],
+                should_stop=JOB.cancel.is_set,
                 write_project=checked["write_3mf"],
                 log=log,
             )
             with JOB.lock:
                 JOB.output = checked["output"]
+        except Stopped:
+            with JOB.lock:
+                JOB.stopped = True
+                JOB.log.append("Stopped")
         except Exception as exc:
             with JOB.lock:
                 JOB.error = str(exc)
@@ -226,6 +286,14 @@ class Handler(BaseHTTPRequestHandler):
             except (FileNotFoundError, OSError) as exc:
                 self._json(404, {"error": str(exc)})
             return
+        if parsed.path == "/api/size":
+            query = parse_qs(parsed.query)
+            raw = query.get("path", [""])[0]
+            try:
+                self._json(200, model_dimensions(raw))
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                self._json(400, {"error": str(exc)})
+            return
         if parsed.path == "/api/status":
             self._json(200, JOB.snapshot())
             return
@@ -245,6 +313,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"settings": save_settings(_numbers(current))})
             except ValueError as exc:
                 self._json(400, {"error": str(exc)})
+            return
+        if parsed.path == "/api/open-output":
+            try:
+                self._json(200, {"path": open_folder(payload.get("output", ""))})
+            except (FileNotFoundError, OSError) as exc:
+                self._json(400, {"error": str(exc)})
+            return
+        if parsed.path == "/api/stop":
+            JOB.cancel.set()
+            self._json(200, {"stopping": True})
             return
         if parsed.path == "/api/run":
             try:

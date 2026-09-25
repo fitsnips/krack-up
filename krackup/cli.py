@@ -54,7 +54,13 @@ def main(argv=None):
         "--min-pins",
         type=int,
         default=2,
-        help="at least this many dowels on each cut plane (default: 2)",
+        help="at least this many dowels on each cut face (default: 2)",
+    )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="scale the model about its center before cutting (default: 1)",
     )
     parser.add_argument("--3mf", action="store_true", help="also write project.3mf")
     parser.add_argument("--info", action="store_true", help="print part sizes and exit")
@@ -76,6 +82,7 @@ def main(argv=None):
         tolerance=args.tolerance,
         pitch=args.pitch,
         min_pins=args.min_pins,
+        scale=args.scale,
         write_project=args.__dict__["3mf"],
         log=lambda msg: print(msg, file=sys.stderr),
     )

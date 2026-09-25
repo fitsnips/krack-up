@@ -88,6 +88,14 @@
   #listing button.item.picked { background: #3a3420; }
   #listing .kind { color: var(--muted); font-size: 12px; }
   #listing .model { color: var(--accent); }
+  #dimensions {
+    margin: 8px 0 0;
+    color: var(--muted);
+    font: 13px/1.45 ui-monospace, monospace;
+    white-space: pre-wrap;
+    max-height: 180px;
+    overflow: auto;
+  }
   #log {
     grid-column: 1 / -1;
     white-space: pre-wrap;
@@ -152,10 +160,15 @@
         <input id="tolerance" type="number" min="0" step="0.05" value="0.1">
       </div>
     </div>
+    <label for="scale">Scale before cutting</label>
+    <input id="scale" type="number" min="0.01" step="0.01" value="1">
+    <pre id="dimensions">Pick a model to see its size.</pre>
     <label class="check"><input id="write-3mf" type="checkbox"> Also write project.3mf</label>
     <div class="actions">
       <button id="save" class="ghost" type="button">Save settings</button>
+      <button id="open-output" class="ghost" type="button">Open output folder</button>
       <button id="run" type="button">Run</button>
+      <button id="stop" class="ghost" type="button" disabled>Stop</button>
       <span id="status"></span>
     </div>
   </section>
@@ -165,6 +178,7 @@
 const $ = (id) => document.getElementById(id);
 let currentDir = "";
 let picked = "";
+let originalParts = [];
 
 function setStatus(text, kind) {
   const node = $("status");
@@ -189,11 +203,13 @@ async function loadConfig() {
   $("min-pins").value = cfg.min_pins;
   $("length").value = cfg.length;
   $("tolerance").value = cfg.tolerance;
+  $("scale").value = cfg.scale ?? 1;
   $("write-3mf").checked = !!cfg.write_3mf;
   $("output").value = cfg.output || "";
   $("input-file").value = cfg.input || "";
   picked = cfg.input || "";
   await browse(cfg.browse || data.home);
+  if (picked) await loadDimensions(picked);
 }
 
 function settingsFromForm() {
@@ -205,6 +221,7 @@ function settingsFromForm() {
     min_pins: Number($("min-pins").value),
     length: Number($("length").value),
     tolerance: Number($("tolerance").value),
+    scale: Number($("scale").value),
     write_3mf: $("write-3mf").checked,
     browse: currentDir,
   };
@@ -245,6 +262,7 @@ async function browse(path) {
 function selectFile(path) {
   picked = path;
   $("input-file").value = path;
+  loadDimensions(path);
   if (!$("output").value.trim()) {
     const stem = path.replace(/\.[^.]+$/, "");
     $("output").value = stem + "-krackup";
@@ -252,12 +270,71 @@ function selectFile(path) {
   browse(currentDir);
 }
 
+function fmt(value) {
+  return Number(value).toFixed(1);
+}
+
+function renderDimensions() {
+  const node = $("dimensions");
+  if (!originalParts.length) {
+    node.textContent = "Pick a model to see its size.";
+    return;
+  }
+  const scale = Number($("scale").value) || 1;
+  const lines = ["Original size (mm)"];
+  for (const part of originalParts) {
+    const [x, y, z] = part.size;
+    lines.push(`${fmt(x)} × ${fmt(y)} × ${fmt(z)}    ${part.name}`);
+  }
+  lines.push("", `At scale ${scale} (mm)`);
+  for (const part of originalParts) {
+    const [x, y, z] = part.size;
+    lines.push(`${fmt(x * scale)} × ${fmt(y * scale)} × ${fmt(z * scale)}    ${part.name}`);
+  }
+  node.textContent = lines.join("\n");
+}
+
+async function loadDimensions(path) {
+  if (!path) {
+    originalParts = [];
+    renderDimensions();
+    return;
+  }
+  $("dimensions").textContent = "Reading size…";
+  const res = await fetch("/api/size?path=" + encodeURIComponent(path));
+  const data = await res.json();
+  if (!res.ok) {
+    originalParts = [];
+    $("dimensions").textContent = data.error || "Could not read that model";
+    return;
+  }
+  originalParts = data.parts || [];
+  renderDimensions();
+}
+
+$("scale").addEventListener("input", renderDimensions);
+
 $("browse-go").onclick = () => browse($("browse-path").value.trim());
 $("browse-up").onclick = () => browse(currentDir.replace(/\/[^/]+\/?$/, "") || "/");
 $("browse-path").addEventListener("keydown", (event) => {
   if (event.key === "Enter") browse($("browse-path").value.trim());
 });
 $("use-folder").onclick = () => { $("output").value = currentDir; };
+
+$("open-output").onclick = async () => {
+  const output = $("output").value.trim();
+  if (!output) {
+    setStatus("Set an output folder first", "bad");
+    return;
+  }
+  const res = await fetch("/api/open-output", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ output }),
+  });
+  const data = await res.json();
+  setStatus(res.ok ? "Opened " + data.path : (data.error || "Could not open that folder"), res.ok ? "ok" : "bad");
+};
 
 $("save").onclick = async () => {
   const res = await fetch("/api/config", {
@@ -269,8 +346,19 @@ $("save").onclick = async () => {
   setStatus(res.ok ? "Settings saved" : (data.error || "Could not save"), res.ok ? "ok" : "bad");
 };
 
+$("stop").onclick = async () => {
+  $("stop").disabled = true;
+  setStatus("Stopping…");
+  await fetch("/api/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+};
+
 $("run").onclick = async () => {
   $("run").disabled = true;
+  $("stop").disabled = false;
   setStatus("Running…");
   $("log").textContent = "";
   const res = await fetch("/api/run", {
@@ -293,12 +381,15 @@ async function poll() {
   $("log").textContent = data.log || "";
   $("log").scrollTop = $("log").scrollHeight;
   if (data.running) {
+    $("stop").disabled = false;
     setStatus("Running…");
     setTimeout(poll, 600);
     return;
   }
   $("run").disabled = false;
-  if (data.error) setStatus(data.error, "bad");
+  $("stop").disabled = true;
+  if (data.stopped) setStatus("Stopped");
+  else if (data.error) setStatus(data.error, "bad");
   else if (data.output) setStatus("Done. " + data.output, "ok");
   else setStatus("");
 }

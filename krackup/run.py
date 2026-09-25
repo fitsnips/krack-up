@@ -7,6 +7,7 @@ from pathlib import Path
 import manifold3d as mf
 import numpy as np
 
+from krackup.faces import pin_existing_faces
 from krackup.meshio import load_models, write_3mf, write_stl
 from krackup.orient import place
 from krackup.pins import add_dowels, dowel_solid
@@ -92,7 +93,30 @@ def describe(path):
     return lines
 
 
-def krack(path, output, printer, length, tolerance, pitch, write_project, min_pins=2, log=print):
+class Stopped(Exception):
+    """The UI asked the running cut to stop."""
+
+
+def scale_vertices(verts, scale):
+    if scale == 1:
+        return verts
+    center = (verts.min(axis=0) + verts.max(axis=0)) / 2
+    return (verts - center) * scale + center
+
+
+def krack(
+    path,
+    output,
+    printer,
+    length,
+    tolerance,
+    pitch,
+    write_project,
+    min_pins=2,
+    scale=1.0,
+    should_stop=None,
+    log=print,
+):
     limit = np.array(usable_box(printer), dtype=np.float64)
     bed = PRINTERS[printer]["bed"]
     output = Path(output)
@@ -104,15 +128,36 @@ def krack(path, output, printer, length, tolerance, pitch, write_project, min_pi
     for old in list(part_dir.glob("*.stl")) + list(dowel_dir.glob("*.stl")):
         old.unlink()
 
+    def emit(message):
+        if should_stop and should_stop():
+            raise Stopped()
+        log(message)
+
     records = []
     all_pins = []
     all_joints = []
     part_index = 1
+    pending = []
     for source_name, verts, faces in load_models(path):
-        log(f"\n{source_name}")
+        emit(f"\n{source_name}")
+        verts = scale_vertices(verts, scale)
         solid = manifold_from(verts, faces)
-        pieces, cuts = split_to_fit(solid, limit, log=log)
-        pins, areas = add_dowels(pieces, cuts, length, tolerance, pitch, min_pins, log=log)
+        pieces, cuts = split_to_fit(solid, limit, log=emit)
+        pins, areas = add_dowels(pieces, cuts, length, tolerance, pitch, min_pins, log=emit)
+        for piece in pieces:
+            piece.source = source_name
+        pending.append((source_name, pieces, cuts, pins, areas))
+        all_pins.extend(pins)
+
+    every_piece = [piece for _, pieces, _, _, _ in pending for piece in pieces]
+    if every_piece:
+        emit("checking cut faces that came in with the file")
+        extra = pin_existing_faces(
+            every_piece, length, tolerance, pitch, min_pins, log=emit
+        )
+        all_pins.extend(extra)
+
+    for source_name, pieces, cuts, pins, areas in pending:
         for piece in pieces:
             normals = [cuts[i]["normal"] for i in piece.cuts]
             posed = place(piece.solid, normals, limit)
@@ -151,7 +196,6 @@ def krack(path, output, printer, length, tolerance, pitch, write_project, min_pi
                     "parts_b": sorted({id_by_piece[id(pin["negative"])] for pin in joint_pins}),
                 }
             )
-        all_pins.extend(pins)
 
     records.sort(key=lambda rec: rec["id"])
     manifest_parts = []
@@ -178,7 +222,9 @@ def krack(path, output, printer, length, tolerance, pitch, write_project, min_pi
         )
         project.append((filename, posed["verts"], posed["faces"]))
 
-    counts = Counter((pin["radius"], pin["length"]) for pin in all_pins)
+    counts = Counter(
+        (pin["radius"], pin["length"]) for pin in all_pins if pin.get("counts", True)
+    )
     dowel_files = []
     for (radius, pin_length), count in sorted(counts.items()):
         solid = dowel_solid(radius, pin_length)
@@ -210,6 +256,7 @@ def krack(path, output, printer, length, tolerance, pitch, write_project, min_pi
             "axial_tolerance_mm": tolerance,
             "pitch_mm": pitch,
             "min_pins_per_plane": min_pins,
+            "scale": scale,
             "radii_mm": list(RADII_NOTE()),
         },
         "parts": manifest_parts,

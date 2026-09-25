@@ -8,7 +8,8 @@ The defaults come from `JM-UPDATED_-_JIMMY_FULL_PRINT_3MF_PENTAGON_DOWELS.3mf`, 
 - pentagon dowels, 10 mm long
 - circumradius 10, 7.5, or 5 mm, largest that fits the joint
 - 0.1 mm clearance in the hole
-- one dowel every 100 mm across each cut, and at least two dowels on every cut plane
+- one dowel every 100 mm across each cut face, and at least two dowels on every cut face, including faces that were already split in the file
+- scale the model about its center before cutting (`--scale`, default 1)
 - each piece turned so the flat joint is on the bed when that needs less support
 
 ```bash

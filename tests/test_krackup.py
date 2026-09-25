@@ -10,7 +10,7 @@ import manifold3d as mf
 
 from krackup.meshio import write_stl
 from krackup.pins import dowel_solid
-from krackup.run import krack
+from krackup.run import Stopped, krack
 
 
 class KrackUpTest(unittest.TestCase):
@@ -47,12 +47,56 @@ class KrackUpTest(unittest.TestCase):
             self.assertTrue((out / "ASSEMBLY.txt").exists())
             self.assertTrue(list((out / "dowels").glob("pentagon_*.stl")))
 
+    def test_scale_shrinks_the_part_and_stop_aborts(self):
+        bar = mf.Manifold.cube((200, 40, 30), center=True)
+        mesh = bar.to_mesh()
+        verts = np.asarray(mesh.vert_properties, dtype=np.float64)[:, :3]
+        faces = np.asarray(mesh.tri_verts, dtype=np.int64)
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / "bar.stl"
+            out = Path(folder) / "out"
+            write_stl(src, verts, faces)
+            with self.assertRaises(Stopped):
+                krack(
+                    src, out, "p1s", 10.0, 0.1, 100.0, False,
+                    should_stop=lambda: True, log=lambda *_: None,
+                )
+            manifest = krack(
+                src, out, "p1s", 10.0, 0.1, 100.0, False,
+                scale=0.5, log=lambda *_: None,
+            )
+        longest = max(max(part["print_size_mm"]) for part in manifest["parts"])
+        self.assertLess(longest, 120)
+        self.assertEqual(manifest["dowel"]["scale"], 0.5)
+
+
+class DimensionsTest(unittest.TestCase):
+    def test_original_size_comes_from_the_file(self):
+        from krackup.ui import model_dimensions
+
+        text = """solid t
+facet normal 0 0 1
+ outer loop
+  vertex 0 0 0
+  vertex 10 0 0
+  vertex 0 20 5
+ endloop
+endfacet
+endsolid t
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tiny.stl"
+            path.write_text(text)
+            size = model_dimensions(path)["parts"][0]["size"]
+        self.assertEqual(size, [10.0, 20.0, 5.0])
+
 
 class SettingsUiTest(unittest.TestCase):
     def test_file_browser_lists_models_and_saves_settings(self):
         import json
         import threading
         from http.server import ThreadingHTTPServer
+        from urllib.error import HTTPError
         from urllib.request import Request, urlopen
 
         from krackup import ui
@@ -81,7 +125,30 @@ class SettingsUiTest(unittest.TestCase):
                 saved = json.load(urlopen(request))
                 self.assertEqual(saved["settings"]["pitch"], 80)
                 self.assertEqual(saved["settings"]["min_pins"], 3)
+                opened = []
+                ui_open = ui.open_folder
+                ui.open_folder = lambda raw: opened.append(raw) or str(root)
+                opened_body = json.dumps({"output": str(root)}).encode()
+                opened_request = Request(
+                    f"http://127.0.0.1:{port}/api/open-output",
+                    data=opened_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                opened_res = json.load(urlopen(opened_request))
+                self.assertEqual(opened, [str(root)])
+                self.assertEqual(opened_res["path"], str(root))
+                missing = Request(
+                    f"http://127.0.0.1:{port}/api/open-output",
+                    data=json.dumps({"output": str(root / "missing")}).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                ui.open_folder = ui_open
+                with self.assertRaises(HTTPError) as missing_open:
+                    urlopen(missing)
+                missing_open.exception.close()
+                self.assertEqual(missing_open.exception.code, 400)
             finally:
+                ui.open_folder = ui_open
                 server.shutdown()
                 server.server_close()
 
