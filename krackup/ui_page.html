@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>krack-up</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #121418;
+    --panel: #1c2028;
+    --line: #2c3340;
+    --text: #e7ecf3;
+    --muted: #93a0b3;
+    --accent: #e2b340;
+    --accent-ink: #1a1404;
+    --ok: #8fd18f;
+    --bad: #f0a0a0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.45 "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 16px 20px 8px;
+  }
+  h1 { font-size: 22px; margin: 0; letter-spacing: 0.02em; }
+  header p { margin: 0; color: var(--muted); }
+  main {
+    display: grid;
+    grid-template-columns: minmax(280px, 1.1fr) minmax(280px, 0.9fr);
+    gap: 16px;
+    padding: 8px 20px 20px;
+  }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  h2 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+  label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
+  input, select, button {
+    font: inherit;
+    color: var(--text);
+    background: #10131a;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  input, select { width: 100%; padding: 7px 8px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .check { display: flex; gap: 8px; align-items: center; margin-top: 12px; color: var(--text); }
+  .check input { width: auto; }
+  button {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border: 0;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-weight: 650;
+  }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .pathbar { display: flex; gap: 8px; margin-bottom: 8px; }
+  .pathbar input { flex: 1; }
+  #listing { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto; }
+  #listing li { border-top: 1px solid var(--line); }
+  #listing button.item {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: var(--text);
+    border: 0;
+    border-radius: 0;
+    padding: 7px 8px;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-weight: 450;
+  }
+  #listing button.item:hover { background: #262c38; }
+  #listing button.item.picked { background: #3a3420; }
+  #listing .kind { color: var(--muted); font-size: 12px; }
+  #listing .model { color: var(--accent); }
+  #log {
+    grid-column: 1 / -1;
+    white-space: pre-wrap;
+    font: 13px/1.4 ui-monospace, monospace;
+    min-height: 140px;
+    max-height: 280px;
+    overflow: auto;
+    color: #d5dbe6;
+  }
+  .actions { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+  #status { color: var(--muted); }
+  #status.ok { color: var(--ok); }
+  #status.bad { color: var(--bad); }
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>krack-up</h1>
+  <p>Cut a model into bed-sized parts. No gcode.</p>
+</header>
+<main>
+  <section>
+    <h2>Input file</h2>
+    <div class="pathbar">
+      <input id="browse-path" spellcheck="false" aria-label="Folder">
+      <button class="ghost" id="browse-go" type="button">Open</button>
+      <button class="ghost" id="browse-up" type="button">Up</button>
+    </div>
+    <ul id="listing"></ul>
+    <label for="input-file">Selected model</label>
+    <input id="input-file" spellcheck="false">
+    <div class="actions">
+      <button class="ghost" id="use-folder" type="button">Use this folder as output</button>
+    </div>
+  </section>
+  <section>
+    <h2>Settings</h2>
+    <label for="output">Output folder</label>
+    <input id="output" spellcheck="false">
+    <label for="printer">Printer</label>
+    <select id="printer"></select>
+    <div class="row">
+      <div>
+        <label for="every">One dowel every (mm)</label>
+        <input id="every" type="number" min="1" step="1" value="100">
+      </div>
+      <div>
+        <label for="min-pins">Minimum dowels per cut</label>
+        <input id="min-pins" type="number" min="1" step="1" value="2">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="length">Dowel length (mm)</label>
+        <input id="length" type="number" min="1" step="0.5" value="10">
+      </div>
+      <div>
+        <label for="tolerance">Hole clearance (mm)</label>
+        <input id="tolerance" type="number" min="0" step="0.05" value="0.1">
+      </div>
+    </div>
+    <label class="check"><input id="write-3mf" type="checkbox"> Also write project.3mf</label>
+    <div class="actions">
+      <button id="save" class="ghost" type="button">Save settings</button>
+      <button id="run" type="button">Run</button>
+      <span id="status"></span>
+    </div>
+  </section>
+  <section id="log" aria-live="polite"></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let currentDir = "";
+let picked = "";
+
+function setStatus(text, kind) {
+  const node = $("status");
+  node.textContent = text;
+  node.className = kind || "";
+}
+
+async function loadConfig() {
+  const res = await fetch("/api/config");
+  const data = await res.json();
+  const printer = $("printer");
+  printer.innerHTML = "";
+  for (const item of data.printers) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = `${item.name}  ${item.bed.join(" × ")} mm`;
+    printer.appendChild(option);
+  }
+  const cfg = data.settings;
+  printer.value = cfg.printer;
+  $("every").value = cfg.pitch;
+  $("min-pins").value = cfg.min_pins;
+  $("length").value = cfg.length;
+  $("tolerance").value = cfg.tolerance;
+  $("write-3mf").checked = !!cfg.write_3mf;
+  $("output").value = cfg.output || "";
+  $("input-file").value = cfg.input || "";
+  picked = cfg.input || "";
+  await browse(cfg.browse || data.home);
+}
+
+function settingsFromForm() {
+  return {
+    input: $("input-file").value.trim(),
+    output: $("output").value.trim(),
+    printer: $("printer").value,
+    pitch: Number($("every").value),
+    min_pins: Number($("min-pins").value),
+    length: Number($("length").value),
+    tolerance: Number($("tolerance").value),
+    write_3mf: $("write-3mf").checked,
+    browse: currentDir,
+  };
+}
+
+async function browse(path) {
+  const res = await fetch("/api/browse?path=" + encodeURIComponent(path));
+  const data = await res.json();
+  if (!res.ok) {
+    setStatus(data.error || "Cannot open that folder", "bad");
+    return;
+  }
+  currentDir = data.path;
+  $("browse-path").value = data.path;
+  const list = $("listing");
+  list.innerHTML = "";
+  for (const entry of data.entries) {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "item" + (entry.path === picked ? " picked" : "");
+    const name = document.createElement("span");
+    name.textContent = entry.dir ? entry.name + "/" : entry.name;
+    if (entry.model) name.className = "model";
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = entry.dir ? "folder" : entry.size;
+    button.append(name, kind);
+    button.onclick = () => {
+      if (entry.dir) browse(entry.path);
+      else selectFile(entry.path);
+    };
+    li.appendChild(button);
+    list.appendChild(li);
+  }
+}
+
+function selectFile(path) {
+  picked = path;
+  $("input-file").value = path;
+  if (!$("output").value.trim()) {
+    const stem = path.replace(/\.[^.]+$/, "");
+    $("output").value = stem + "-krackup";
+  }
+  browse(currentDir);
+}
+
+$("browse-go").onclick = () => browse($("browse-path").value.trim());
+$("browse-up").onclick = () => browse(currentDir.replace(/\/[^/]+\/?$/, "") || "/");
+$("browse-path").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") browse($("browse-path").value.trim());
+});
+$("use-folder").onclick = () => { $("output").value = currentDir; };
+
+$("save").onclick = async () => {
+  const res = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settingsFromForm()),
+  });
+  const data = await res.json();
+  setStatus(res.ok ? "Settings saved" : (data.error || "Could not save"), res.ok ? "ok" : "bad");
+};
+
+$("run").onclick = async () => {
+  $("run").disabled = true;
+  setStatus("Running…");
+  $("log").textContent = "";
+  const res = await fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settingsFromForm()),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    setStatus(data.error || "Could not start", "bad");
+    $("run").disabled = false;
+    return;
+  }
+  poll();
+};
+
+async function poll() {
+  const res = await fetch("/api/status");
+  const data = await res.json();
+  $("log").textContent = data.log || "";
+  $("log").scrollTop = $("log").scrollHeight;
+  if (data.running) {
+    setStatus("Running…");
+    setTimeout(poll, 600);
+    return;
+  }
+  $("run").disabled = false;
+  if (data.error) setStatus(data.error, "bad");
+  else if (data.output) setStatus("Done. " + data.output, "ok");
+  else setStatus("");
+}
+
+loadConfig().catch((error) => setStatus(String(error), "bad"));
+</script>
+</body>
+</html>
