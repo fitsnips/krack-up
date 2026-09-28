@@ -28,7 +28,8 @@ def add_dowels(pieces, cuts, length, tolerance, pitch, min_pins=2, log=print):
         planned.extend(pins)
         if area >= 80:
             log(f"joint {cut['id']}: {area:.0f} mm2, {len(pins)} dowels")
-    _carve(pieces, planned)
+    failed = _carve(pieces, planned, log)
+    planned = [pin for pin in planned if id(pin) not in failed]
     return planned, areas
 
 
@@ -144,6 +145,25 @@ def _make_pin(x, y, radius, length, tolerance, depth, positive, negative, frame,
         "offset": offset,
         "positive": owner_pos,
         "negative": owner_neg,
+        "holes": [
+            socket(owner_pos, frame, x, y, offset, 1.0),
+            socket(owner_neg, frame, x, y, offset, -1.0),
+        ],
+    }
+
+
+def socket(piece, frame, x, y, offset, side):
+    """One hole. (x, y) are in `frame`, on the plane z' = offset.
+
+    The hole runs along side * frame[2] from that plane into the piece.
+    """
+    return {
+        "piece": piece,
+        "frame": frame,
+        "x": float(x),
+        "y": float(y),
+        "offset": float(offset),
+        "side": float(side),
     }
 
 
@@ -185,36 +205,63 @@ def _owner(group, frame, height, x, y, radius):
     return None
 
 
-def _carve(pieces, pins):
+def _carve(pieces, pins, log=print):
+    """Cut every pin's holes. Returns ids of pins that lost a hole.
+
+    A dowel is only useful when both of its holes exist, so the caller drops
+    those pins from the print count.
+    """
     jobs = {}
     for pin in pins:
-        for piece, side in ((pin["positive"], 1.0), (pin["negative"], -1.0)):
-            jobs.setdefault(id(piece), []).append((pin, side))
+        for hole in pin["holes"]:
+            jobs.setdefault(id(hole["piece"]), []).append((pin, hole))
+    failed = set()
     for piece in pieces:
         group = jobs.get(id(piece))
         if not group:
             continue
-        boxes = [_hole(pin, side) for pin, side in group]
-        tool = boxes[0]
-        for box in boxes[1:]:
-            tool = tool + box
-        carved = piece.solid - tool
-        if "NoError" in str(carved.status()) and carved.volume() > 0:
+        tools = [_hole(pin, hole) for pin, hole in group]
+        tool = tools[0]
+        for extra in tools[1:]:
+            tool = tool + extra
+        carved = _cut(piece.solid, tool)
+        if carved is not None:
             piece.solid = carved
+            continue
+        # One bad hole should not cost the part all of its sockets.
+        for (pin, _), single in zip(group, tools):
+            carved = _cut(piece.solid, single)
+            if carved is None:
+                failed.add(id(pin))
+            else:
+                piece.solid = carved
+    if failed:
+        log(
+            f"warning: {len(failed)} dowel holes could not be cut; those dowels are "
+            "left out and their other socket stays empty"
+        )
+    return failed
 
 
-def _hole(pin, side):
-    frame = pin["frame"]
+def _cut(solid, tool):
+    carved = solid - tool
+    if "NoError" in str(carved.status()) and carved.volume() > 0:
+        return carved
+    return None
+
+
+def _hole(pin, hole):
+    frame = hole["frame"]
     x_axis, y_axis, normal = frame[0], frame[1], frame[2]
-    origin = frame.T @ np.array([pin["x"], pin["y"], pin["offset"]])
-    into = side * normal
+    origin = frame.T @ np.array([hole["x"], hole["y"], hole["offset"]])
+    into = hole["side"] * normal
     depth = pin["depth"]
     length = depth + 0.3
     center = origin + into * (depth / 2.0 - 0.15)
     matrix = np.column_stack([x_axis, y_axis, into, center])
-    hole = dowel_solid(pin["radius"] + pin["tolerance"], length)
+    tool = dowel_solid(pin["radius"] + pin["tolerance"], length)
     # dowel_solid is centered on Z. Move that axis onto `into`.
-    return hole.transform(matrix)
+    return tool.transform(matrix)
 
 
 def _pentagon(radius):

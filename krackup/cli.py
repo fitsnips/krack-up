@@ -2,10 +2,12 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from krackup import __version__
 from krackup.printers import DEFAULT_PRINTER, PRINTERS
 from krackup.run import describe, krack
+from krackup.solid import KrackError
 
 
 def main(argv=None):
@@ -66,14 +68,28 @@ def main(argv=None):
     parser.add_argument("--info", action="store_true", help="print part sizes and exit")
     parser.add_argument("--version", action="version", version=f"krack-up {__version__}")
     args = parser.parse_args(argv)
+    if args.min_pins < 1:
+        parser.error("--min-pins must be at least 1")
+    for name in ("length", "pitch", "scale"):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name} must be greater than 0")
+    if args.tolerance < 0:
+        parser.error("--tolerance cannot be negative")
+    try:
+        return _run(args)
+    except KrackError as exc:
+        print(f"krack-up: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run(args):
     if args.info:
         for line in describe(args.input):
             print(line)
         return 0
     output = args.output
     if not output:
-        stem = args.input.rsplit(".", 1)[0]
-        output = stem + "-krackup"
+        output = str(Path(args.input).with_suffix("")) + "-krackup"
     krack(
         args.input,
         output,

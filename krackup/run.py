@@ -4,82 +4,17 @@ import json
 from collections import Counter
 from pathlib import Path
 
-import manifold3d as mf
 import numpy as np
 
 from krackup.faces import pin_existing_faces
 from krackup.meshio import load_models, write_3mf, write_stl
 from krackup.orient import place
-from krackup.pins import add_dowels, dowel_solid
+from krackup.pins import RADII, add_dowels, dowel_solid
 from krackup.printers import MARGIN_XY, MARGIN_Z, PRINTERS, usable_box
+from krackup.solid import KrackError, manifold_from, mesh_arrays
 from krackup.split import split_to_fit
 
-
-def manifold_from(verts, faces):
-    verts, faces = _weld(verts, faces)
-    verts, faces = _fill_small_holes(verts, faces)
-    mesh = mf.Mesh(
-        vert_properties=np.ascontiguousarray(verts, dtype=np.float32),
-        tri_verts=np.ascontiguousarray(faces, dtype=np.uint32),
-    )
-    solid = mf.Manifold(mesh)
-    status = str(solid.status())
-    if "NoError" not in status:
-        raise SystemExit(f"mesh is not a solid ({status})")
-    return solid
-
-
-def _weld(verts, faces):
-    verts = np.asarray(verts, dtype=np.float64)
-    faces = np.asarray(faces, dtype=np.int64)
-    _, index, inverse = np.unique(np.round(verts, 5), axis=0, return_index=True, return_inverse=True)
-    welded = verts[index]
-    faces = inverse[faces]
-    keep = (
-        (faces[:, 0] != faces[:, 1])
-        & (faces[:, 1] != faces[:, 2])
-        & (faces[:, 2] != faces[:, 0])
-    )
-    return welded, faces[keep]
-
-
-def _fill_small_holes(verts, faces):
-    """Close gaps of a few edges. A missing triangle makes Manifold reject the part."""
-    faces = np.asarray(faces, dtype=np.int64)
-    directed = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    undirected = np.sort(directed, axis=1)
-    _, counts = np.unique(undirected, axis=0, return_counts=True)
-    if not np.any(counts == 1):
-        return verts, faces
-    # Keep the direction used by the existing face. The patch uses the opposite.
-    packed = directed[:, 0].astype(np.int64) << 32 | directed[:, 1].astype(np.int64)
-    reverse = directed[:, 1].astype(np.int64) << 32 | directed[:, 0].astype(np.int64)
-    boundary = set(packed.tolist()) - set(reverse.tolist())
-    if not boundary:
-        return verts, faces
-    nxt = {}
-    for key in boundary:
-        nxt[int(key >> 32)] = int(key & 0xFFFFFFFF)
-    seen = set()
-    extra = []
-    for start in list(nxt):
-        if start in seen:
-            continue
-        loop = [start]
-        seen.add(start)
-        cursor = nxt[start]
-        while cursor != start and cursor not in seen and cursor in nxt:
-            loop.append(cursor)
-            seen.add(cursor)
-            cursor = nxt[cursor]
-        if cursor != start or len(loop) < 3 or len(loop) > 12:
-            continue
-        loop = loop[::-1]
-        for i in range(1, len(loop) - 1):
-            extra.append((loop[0], loop[i], loop[i + 1]))
-    if not extra:
-        return verts, faces
-    return verts, np.vstack([faces, np.asarray(extra, dtype=np.int64)])
+__all__ = ["KrackError", "Stopped", "describe", "krack", "manifold_from", "scale_vertices"]
 
 
 def describe(path):
@@ -133,12 +68,9 @@ def krack(
             raise Stopped()
         log(message)
 
-    records = []
     all_pins = []
-    all_joints = []
-    part_index = 1
     pending = []
-    for source_name, verts, faces in load_models(path):
+    for origin, (source_name, verts, faces) in enumerate(load_models(path)):
         emit(f"\n{source_name}")
         verts = scale_vertices(verts, scale)
         solid = manifold_from(verts, faces)
@@ -146,25 +78,29 @@ def krack(
         pins, areas = add_dowels(pieces, cuts, length, tolerance, pitch, min_pins, log=emit)
         for piece in pieces:
             piece.source = source_name
+            piece.origin = origin
+            piece.planes = [(cuts[i]["normal"], cuts[i]["offset"]) for i in piece.cuts]
         pending.append((source_name, pieces, cuts, pins, areas))
         all_pins.extend(pins)
 
     every_piece = [piece for _, pieces, _, _, _ in pending for piece in pieces]
-    if every_piece:
+    file_pins = []
+    if len({piece.origin for piece in every_piece}) > 1:
         emit("checking cut faces that came in with the file")
-        extra = pin_existing_faces(
-            every_piece, length, tolerance, pitch, min_pins, log=emit
-        )
-        all_pins.extend(extra)
+        file_pins = pin_existing_faces(every_piece, length, tolerance, pitch, min_pins, log=emit)
+        all_pins.extend(file_pins)
 
-    for source_name, pieces, cuts, pins, areas in pending:
+    records = []
+    part_index = 1
+    for source_name, pieces, cuts, _, _ in pending:
+        group = []
         for piece in pieces:
             normals = [cuts[i]["normal"] for i in piece.cuts]
             posed = place(piece.solid, normals, limit)
             if posed is None:
                 size = piece.solid.bounding_box()
-                raise SystemExit(f"a piece of {source_name} does not fit: {size}")
-            records.append(
+                raise KrackError(f"a piece of {source_name} does not fit: {size}")
+            group.append(
                 {
                     "source": source_name,
                     "piece": piece,
@@ -172,32 +108,39 @@ def krack(
                     "centroid": _centroid(piece.solid),
                 }
             )
-        id_by_piece = {}
-        # ids assigned after all pieces of this source exist, sorted by height
-        group = records[-len(pieces):]
+        # Number the parts of each source bottom to top.
         group.sort(key=lambda rec: (rec["centroid"][2], rec["centroid"][0]))
         for rec in group:
             rec["id"] = part_index
-            id_by_piece[id(rec["piece"])] = part_index
             part_index += 1
+        records.extend(group)
+    id_by_piece = {id(rec["piece"]): rec["id"] for rec in records}
+
+    all_joints = []
+    for source_name, _, cuts, pins, areas in pending:
         for cut in cuts:
             joint_pins = [pin for pin in pins if pin["cut_id"] == cut["id"]]
             if areas.get(cut["id"], 0) < 80 and not joint_pins:
                 continue
             all_joints.append(
-                {
-                    "source": source_name,
-                    "cut_id": cut["id"],
-                    "reason": cut["reason"],
-                    "mating_area_mm2": round(areas.get(cut["id"], 0), 1),
-                    "dowels": len(joint_pins),
-                    "radii_mm": sorted({pin["radius"] for pin in joint_pins}),
-                    "parts_a": sorted({id_by_piece[id(pin["positive"])] for pin in joint_pins}),
-                    "parts_b": sorted({id_by_piece[id(pin["negative"])] for pin in joint_pins}),
-                }
+                _joint(source_name, cut["id"], cut["reason"], areas.get(cut["id"], 0), joint_pins, id_by_piece)
             )
+    by_joint = {}
+    for pin in file_pins:
+        by_joint.setdefault(pin["cut_id"], []).append(pin)
+    for joint_id, joint_pins in by_joint.items():
+        first = joint_pins[0]
+        all_joints.append(
+            _joint(
+                f"{first['positive'].source} + {first['negative'].source}",
+                joint_id,
+                "cut face in the file",
+                first["area"],
+                joint_pins,
+                id_by_piece,
+            )
+        )
 
-    records.sort(key=lambda rec: rec["id"])
     manifest_parts = []
     project = []
     for rec in records:
@@ -222,20 +165,14 @@ def krack(
         )
         project.append((filename, posed["verts"], posed["faces"]))
 
-    counts = Counter(
-        (pin["radius"], pin["length"]) for pin in all_pins if pin.get("counts", True)
-    )
+    counts = Counter((pin["radius"], pin["length"]) for pin in all_pins)
     dowel_files = []
     for (radius, pin_length), count in sorted(counts.items()):
-        solid = dowel_solid(radius, pin_length)
-        mesh = solid.to_mesh()
-        verts = np.asarray(mesh.vert_properties, dtype=np.float64)[:, :3]
-        faces = np.asarray(mesh.tri_verts, dtype=np.int64)
+        verts, faces = mesh_arrays(dowel_solid(radius, pin_length))
         verts = verts.copy()
         verts[:, 2] -= verts[:, 2].min()
-        filename = f"pentagon_R{radius:.1f}_L{pin_length:.0f}.stl".replace(".0", "")
-        # 7.5 must stay distinguishable from 7 and 10.
-        filename = f"pentagon_R{radius:g}_L{pin_length:.0f}.stl"
+        # :g keeps 7.5 distinguishable from 7 and 10.
+        filename = f"pentagon_R{radius:g}_L{pin_length:g}.stl"
         write_stl(dowel_dir / filename, verts, faces)
         dowel_files.append(
             {"file": f"dowels/{filename}", "radius_mm": radius, "length_mm": pin_length, "count": count}
@@ -257,7 +194,7 @@ def krack(
             "pitch_mm": pitch,
             "min_pins_per_plane": min_pins,
             "scale": scale,
-            "radii_mm": list(RADII_NOTE()),
+            "radii_mm": list(RADII),
         },
         "parts": manifest_parts,
         "joints": all_joints,
@@ -271,17 +208,28 @@ def krack(
     return manifest
 
 
-def RADII_NOTE():
-    return [10.0, 7.5, 5.0]
+def _joint(source, joint_id, reason, area, pins, id_by_piece):
+    return {
+        "source": source,
+        "cut_id": joint_id,
+        "reason": reason,
+        "mating_area_mm2": round(float(area), 1),
+        "dowels": len(pins),
+        "radii_mm": sorted({pin["radius"] for pin in pins}),
+        "parts_a": sorted({id_by_piece[id(pin["positive"])] for pin in pins}),
+        "parts_b": sorted({id_by_piece[id(pin["negative"])] for pin in pins}),
+    }
 
 
 def _centroid(solid):
-    mesh = solid.to_mesh()
-    verts = np.asarray(mesh.vert_properties, dtype=np.float64)[:, :3]
+    verts, _ = mesh_arrays(solid)
     return verts.mean(axis=0)
 
 
 def _text(manifest):
+    dowel = manifest["dowel"]
+    radii = ", ".join(f"{radius:g}" for radius in dowel["radii_mm"][:-1])
+    radii = f"{radii}, or {dowel['radii_mm'][-1]:g} mm"
     lines = [
         "krack-up",
         "",
@@ -289,15 +237,16 @@ def _text(manifest):
         f"{manifest['bed_mm'][1]:.0f} x {manifest['bed_mm'][2]:.0f} mm.",
         f"Each part fits in {manifest['usable_mm'][0]:.0f} x "
         f"{manifest['usable_mm'][1]:.0f} x {manifest['usable_mm'][2]:.0f} mm "
-        "so a 5 mm brim still lands on the bed.",
+        "so a brim still lands on the bed.",
         "",
         f"Pieces: {len(manifest['parts'])}",
         f"Dowels: {sum(item['count'] for item in manifest['dowels'])}",
-        "Shape: pentagon. Length 10 mm unless you changed --length.",
-        "Circumradius is 10, 7.5, or 5 mm, whichever is the largest that fits the joint.",
-        f"One dowel every {manifest['dowel']['pitch_mm']:.0f} mm across each cut, "
-        f"and at least {manifest['dowel']['min_pins_per_plane']} dowels on every cut plane.",
-        "The hole is 0.1 mm larger in radius and 0.1 mm deeper on each side.",
+        f"Shape: pentagon, {dowel['length_mm']:g} mm long.",
+        f"Circumradius is {radii}, whichever is the largest that fits the joint.",
+        f"One dowel every {dowel['pitch_mm']:g} mm across each cut, "
+        f"and at least {dowel['min_pins_per_plane']} dowels on every cut plane.",
+        f"The hole is {dowel['radial_tolerance_mm']:g} mm larger in radius and "
+        f"{dowel['axial_tolerance_mm']:g} mm deeper on each side.",
         "Sockets are cut into both faces. The dowels are separate STLs.",
         "",
         "Print each part in the pose it was exported. Z = 0 is the bed.",

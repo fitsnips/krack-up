@@ -3,13 +3,14 @@
 import numpy as np
 
 from krackup.geom import fits
+from krackup.solid import mesh_arrays
 from krackup.split import orientations_for
+
+OVERHANG = 45.0
 
 
 def place(solid, normals, limit):
-    mesh = solid.to_mesh()
-    verts = np.asarray(mesh.vert_properties, dtype=np.float64)[:, :3]
-    faces = np.asarray(mesh.tri_verts, dtype=np.int64)
+    verts, faces = mesh_arrays(solid)
     best = None
     for name, frame in orientations_for(normals):
         rotated = verts @ frame.T
@@ -49,8 +50,9 @@ def _support(verts, faces):
     angle = np.degrees(
         np.arctan2(np.hypot(unit_normals[:, 0], unit_normals[:, 1]), np.abs(unit_normals[:, 2]))
     )
+    # angle is measured from straight down. Under 45 degrees needs support.
     # The face sitting on the bed is not support.
     height = triangles[:, :, 2].mean(axis=1)
-    overhang = (unit_normals[:, 2] < 0) & (angle < 30.0) & (height > 0.6)
+    overhang = (unit_normals[:, 2] < 0) & (angle < OVERHANG) & (height > 0.6)
     contact = (unit_normals[:, 2] < -0.97) & (height < 0.8)
     return float(area[overhang].sum()), float(area[contact].sum())

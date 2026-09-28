@@ -7,17 +7,35 @@ from xml.etree import ElementTree as ET
 
 import numpy as np
 
+from krackup.solid import KrackError, manifold_from, mesh_arrays
+
 CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 MODEL_REL = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"
+UNITS = {
+    "micron": 0.001,
+    "millimeter": 1.0,
+    "centimeter": 10.0,
+    "inch": 25.4,
+    "foot": 304.8,
+    "meter": 1000.0,
+}
+# 3MF object types that are not printed as part of the model.
+SKIP_TYPES = {"support", "solidsupport", "surface", "other"}
+# Bambu part subtypes. Modifiers and support volumes are not geometry.
+SOLID_PART = "normal_part"
+NEGATIVE_PART = "negative_part"
 
 
 def read_stl(path):
     data = Path(path).read_bytes()
-    if data[:5].lower() == b"solid" and b"\0" not in data[:200]:
-        return _read_ascii_stl(data.decode("utf-8", "replace"))
-    count = struct.unpack_from("<I", data, 80)[0]
+    count = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else -1
+    # Some binary exporters also start the header with "solid", so trust the size.
+    if len(data) != 84 + 50 * count:
+        if data[:5].lower() == b"solid":
+            return _read_ascii_stl(data.decode("utf-8", "replace"))
+        raise KrackError(f"{path} is not a valid STL")
     record = np.dtype([("n", "<f4", (3,)), ("v", "<f4", (3, 3)), ("a", "<u2")])
     tris = np.frombuffer(data, dtype=record, count=count, offset=84)
     verts = np.ascontiguousarray(tris["v"].reshape(-1, 3), dtype=np.float64)
@@ -51,7 +69,7 @@ def load_models(path):
         return [(path.stem, verts, faces)]
     if path.suffix.lower() == ".3mf":
         return _load_3mf(path)
-    raise SystemExit(f"unsupported file type: {path.suffix}")
+    raise KrackError(f"unsupported file type: {path.suffix}")
 
 
 def write_3mf(path, objects):
@@ -63,11 +81,13 @@ def write_3mf(path, objects):
     cursor_x = 0.0
     for index, (name, verts, faces) in enumerate(objects, start=1):
         resources.append(_object_xml(index, name, verts, faces))
+        low = float(np.min(verts[:, 0])) if len(verts) else 0.0
+        high = float(np.max(verts[:, 0])) if len(verts) else 0.0
+        # Put this object's left edge at the cursor so neighbours never overlap.
         items.append(
-            f'<item objectid="{index}" transform="1 0 0 0 1 0 0 0 1 {cursor_x:.3f} 0 0"/>'
+            f'<item objectid="{index}" transform="1 0 0 0 1 0 0 0 1 {cursor_x - low:.3f} 0 0"/>'
         )
-        width = float(np.max(verts[:, 0]) - np.min(verts[:, 0])) if len(verts) else 0.0
-        cursor_x += width + 10.0
+        cursor_x += (high - low) + 10.0
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<model unit="millimeter" xml:lang="en-US" xmlns="{CORE}">\n'
@@ -99,60 +119,84 @@ def write_3mf(path, objects):
 
 def _load_3mf(path):
     with zipfile.ZipFile(path) as archive:
-        models = {"/3D/3dmodel.model": _parse_model(archive.read("3D/3dmodel.model"))}
-        root = models["/3D/3dmodel.model"]
+        root_path = _root_model_path(archive)
+        models = {}
+        root = _ensure_model(archive, models, root_path)
         names = _object_names(archive)
+        subtypes = _part_subtypes(archive)
         loaded = []
         for item in root["build"]:
-            verts, faces = _resolve(archive, models, "/3D/3dmodel.model", item["id"], item["transform"])
+            chunks = _resolve(
+                archive, models, root_path, item["id"], item["transform"],
+                kinds=subtypes.get(item["id"], {}),
+            )
+            verts, faces = _combine(chunks)
             if len(faces) == 0:
                 continue
+            verts = verts * root["scale"]
             loaded.append((names.get(item["id"]) or item["name"] or f"object_{item['id']}", verts, faces))
     if not loaded:
-        raise SystemExit(f"no meshes found in {path}")
+        raise KrackError(f"no meshes found in {path}")
     return loaded
+
+
+def _root_model_path(archive):
+    try:
+        rels = ET.fromstring(archive.read("_rels/.rels"))
+    except KeyError:
+        return "/3D/3dmodel.model"
+    for rel in rels.iter():
+        if _tag(rel) == "Relationship" and rel.attrib.get("Type") == MODEL_REL:
+            target = rel.attrib.get("Target", "")
+            return target if target.startswith("/") else "/" + target
+    return "/3D/3dmodel.model"
 
 
 def _parse_model(data):
     # Namespaces vary. Strip them so the tree is easy to walk.
-    text = data.decode("utf-8")
-    root = ET.fromstring(text)
+    root = ET.fromstring(data)
+    scale = UNITS.get(root.attrib.get("unit", "millimeter"), 1.0)
     objects = {}
     for obj in root.iter():
         if _tag(obj) != "object":
             continue
-        mesh = None
         components = []
-        for child in obj.iter():
-            tag = _tag(child)
-            if tag == "vertex":
-                pass
-            elif tag == "component":
-                components.append(
-                    {
-                        "id": int(child.attrib["objectid"]),
-                        "path": child.attrib.get(f"{{{PROD}}}path", ""),
-                        "transform": _transform(child.attrib.get("transform")),
-                    }
-                )
         vertices = []
         faces = []
-        mesh_node = next((c for c in obj if _tag(c) == "mesh"), None)
-        if mesh_node is not None:
-            for node in mesh_node.iter():
-                if _tag(node) == "vertex":
-                    vertices.append(
-                        (float(node.attrib["x"]), float(node.attrib["y"]), float(node.attrib["z"]))
+        for child in obj:
+            if _tag(child) == "components":
+                for comp in child:
+                    if _tag(comp) != "component":
+                        continue
+                    components.append(
+                        {
+                            "id": int(comp.attrib["objectid"]),
+                            "path": comp.attrib.get(f"{{{PROD}}}path", ""),
+                            "transform": _transform(comp.attrib.get("transform")),
+                        }
                     )
-                elif _tag(node) == "triangle":
-                    faces.append(
-                        (int(node.attrib["v1"]), int(node.attrib["v2"]), int(node.attrib["v3"]))
-                    )
+            elif _tag(child) == "mesh":
+                for node in child.iter():
+                    if _tag(node) == "vertex":
+                        vertices.append(
+                            (float(node.attrib["x"]), float(node.attrib["y"]), float(node.attrib["z"]))
+                        )
+                    elif _tag(node) == "triangle":
+                        faces.append(
+                            (int(node.attrib["v1"]), int(node.attrib["v2"]), int(node.attrib["v3"]))
+                        )
+        mesh = None
+        if faces:
             mesh = (
                 np.asarray(vertices, dtype=np.float64),
                 np.asarray(faces, dtype=np.int64),
             )
-        objects[int(obj.attrib["id"])] = {"mesh": mesh, "components": components, "name": obj.attrib.get("name", "")}
+        objects[int(obj.attrib["id"])] = {
+            "mesh": mesh,
+            "components": components,
+            "name": obj.attrib.get("name", ""),
+            "type": obj.attrib.get("type", "model"),
+        }
     build = []
     for item in root.iter():
         if _tag(item) != "item":
@@ -168,30 +212,85 @@ def _parse_model(data):
         # Some files omit <build> and just store one mesh.
         for obj_id, obj in objects.items():
             if obj["mesh"] is not None:
-                build.append({"id": obj_id, "name": obj["name"], "transform": np.eye(4)[:3]})
-    return {"objects": objects, "build": build}
+                build.append({"id": obj_id, "name": obj["name"], "transform": _transform(None)})
+    return {"objects": objects, "build": build, "scale": scale}
 
 
-def _resolve(archive, models, model_path, obj_id, transform):
+def _resolve(
+    archive, models, model_path, obj_id, transform,
+    kinds=None, kind=SOLID_PART, root_scale=None, explicit=False,
+):
+    """Return (verts, faces, kind) chunks for an object and its components.
+
+    `kinds` maps component object ids to Bambu part subtypes. It only applies to
+    the first level of components, which is where Bambu Studio puts parts.
+    Bambu marks every part but the body type="other", so when it names a
+    subtype that decides, not the 3MF object type.
+    """
     model = _ensure_model(archive, models, model_path)
+    if root_scale is None:
+        root_scale = model["scale"]
     obj = model["objects"][obj_id]
+    if obj["type"] in SKIP_TYPES and not explicit:
+        return []
     chunks = []
-    if obj["mesh"] is not None and len(obj["mesh"][0]) >= 50:
+    if obj["mesh"] is not None:
         verts, faces = obj["mesh"]
-        chunks.append(_apply(verts, faces, transform))
+        # Vertices in another model file may use another unit.
+        verts = verts * (model["scale"] / root_scale)
+        moved, faces = _apply(verts, faces, transform)
+        chunks.append((moved, faces, kind))
     for comp in obj["components"]:
         path = comp["path"] or model_path
         combined = _compose(transform, comp["transform"])
-        chunks.append(_resolve(archive, models, path, comp["id"], combined))
-    if not chunks:
+        named = bool(kinds) and comp["id"] in kinds
+        comp_kind = kinds[comp["id"]] if named else kind
+        chunks.extend(
+            _resolve(
+                archive, models, path, comp["id"], combined,
+                None, comp_kind, root_scale, explicit or named,
+            )
+        )
+    return chunks
+
+
+def _combine(chunks):
+    """Union the solid parts of one object and subtract its negative parts."""
+    solids = [(v, f) for v, f, kind in chunks if kind == SOLID_PART and len(f)]
+    holes = [(v, f) for v, f, kind in chunks if kind == NEGATIVE_PART and len(f)]
+    if not solids:
         return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64)
-    return _merge(chunks)
+    if len(solids) == 1 and not holes:
+        return solids[0]
+    try:
+        body = _union([manifold_from(v, f) for v, f in solids])
+        if holes:
+            body = body - _union([manifold_from(v, f) for v, f in holes])
+        verts, faces = mesh_arrays(body)
+        if len(faces):
+            return verts, faces
+    except KrackError:
+        pass
+    # A part that is not a closed solid cannot go through booleans. Keep the
+    # solid parts as they are, which is what the file shows without its cuts.
+    return _merge(solids)
+
+
+def _union(solids):
+    body = solids[0]
+    for solid in solids[1:]:
+        body = body + solid
+    return body
 
 
 def _ensure_model(archive, models, path):
     key = path if path.startswith("/") else "/" + path
     if key not in models:
-        models[key] = _parse_model(archive.read(key.lstrip("/")))
+        try:
+            data = archive.read(key.lstrip("/"))
+        except KeyError:
+            raise KrackError(f"3MF is missing {key}") from None
+        models[key] = _parse_model(data)
     return models[key]
 
 
@@ -229,15 +328,19 @@ def _merge(chunks):
 
 
 def _transform(text):
-    """3MF transforms in these Bambu files are 9 matrix values, then tx ty tz."""
+    """Return a 3x4 [R | t] that maps column vectors: p' = R p + t.
+
+    3MF writes "m00 m01 m02 m10 m11 m12 m20 m21 m22 m30 m31 m32" and applies
+    it to row vectors, p' = p M, so R is the transpose of the first nine.
+    """
     out = np.zeros((3, 4), dtype=np.float64)
     out[:, :3] = np.eye(3)
     if not text:
         return out
     nums = [float(part) for part in text.split()]
     if len(nums) != 12:
-        raise SystemExit(f"transform has {len(nums)} values, expected 12")
-    out[:, :3] = np.asarray(nums[:9], dtype=np.float64).reshape(3, 3)
+        raise KrackError(f"transform has {len(nums)} values, expected 12")
+    out[:, :3] = np.asarray(nums[:9], dtype=np.float64).reshape(3, 3).T
     out[:, 3] = nums[9:12]
     return out
 
@@ -255,6 +358,26 @@ def _object_names(archive):
                 names[int(obj.attrib["id"])] = meta.attrib.get("value", "")
                 break
     return names
+
+
+def _part_subtypes(archive):
+    """Bambu Studio keeps each part's role in model_settings.config.
+
+    Returns {object id: {component object id: subtype}}.
+    """
+    if "Metadata/model_settings.config" not in archive.namelist():
+        return {}
+    root = ET.fromstring(archive.read("Metadata/model_settings.config"))
+    found = {}
+    for obj in root.iter():
+        if _tag(obj) != "object" or "id" not in obj.attrib:
+            continue
+        parts = {}
+        for part in obj:
+            if _tag(part) == "part" and "id" in part.attrib:
+                parts[int(part.attrib["id"])] = part.attrib.get("subtype", SOLID_PART)
+        found[int(obj.attrib["id"])] = parts
+    return found
 
 
 def _tag(node):

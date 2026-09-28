@@ -7,8 +7,12 @@ cross-section wins, which is where a limb joint usually is.
 import numpy as np
 
 from krackup.geom import apply_frame, extents, fits, pca, unit
+from krackup.solid import KrackError
 
 MIN_CUT = 36.0
+# Anything smaller is a sliver left by the plane cut, not part of the model.
+SLIVER = 1.0
+SMALL_PIECE = 200.0
 
 
 class Piece:
@@ -16,6 +20,9 @@ class Piece:
         self.solid = solid
         self.cuts = list(cuts)
         self.stall = stall
+        self.source = None
+        self.origin = None
+        self.planes = []
 
 
 def split_to_fit(solid, limit, log=print):
@@ -26,11 +33,17 @@ def split_to_fit(solid, limit, log=print):
     while queue:
         steps += 1
         if steps > 2000:
-            raise RuntimeError("split did not finish")
+            raise KrackError("split did not finish")
         piece = queue.pop()
         volume = piece.solid.volume()
-        if volume < 200.0:
+        if volume < SLIVER:
             continue
+        if volume < SMALL_PIECE:
+            size = extents(piece.solid.bounding_box())
+            log(
+                f"small piece {size[0]:.0f} x {size[1]:.0f} x {size[2]:.0f} mm "
+                f"({volume:.0f} mm3), kept"
+            )
         if _fits_any(piece.solid, limit, [cuts[i]["normal"] for i in piece.cuts]):
             accepted.append(piece)
             size = extents(piece.solid.bounding_box())
@@ -41,7 +54,7 @@ def split_to_fit(solid, limit, log=print):
             continue
         if piece.stall >= 6:
             size = extents(piece.solid.bounding_box())
-            raise RuntimeError(f"could not fit a piece on the bed: {size}")
+            raise KrackError(f"could not fit a piece on the bed: {size}")
         direction, offset, reason = (
             _forced_plane(piece.solid, piece.stall - 1)
             if piece.stall

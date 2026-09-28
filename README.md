@@ -8,7 +8,9 @@ The defaults come from `JM-UPDATED_-_JIMMY_FULL_PRINT_3MF_PENTAGON_DOWELS.3mf`, 
 - pentagon dowels, 10 mm long
 - circumradius 10, 7.5, or 5 mm, largest that fits the joint
 - 0.1 mm clearance in the hole
-- one dowel every 100 mm across each cut face, and at least two dowels on every cut face, including faces that were already split in the file
+- one dowel every 100 mm across each cut face, and at least two dowels on every cut face
+- joints between objects that were already cut apart in a 3MF get the same rule; faces that already have enough dowels are left alone. A joint is found by matching outlines, so two identical flat faces on different objects can be mistaken for one
+- Bambu negative parts (cut connector sockets) are cut out of their object; modifier parts are ignored
 - scale the model about its center before cutting (`--scale`, default 1)
 - each piece turned so the flat joint is on the bed when that needs less support
 
@@ -27,3 +29,9 @@ Output:
 - `ASSEMBLY.txt` and `assembly.json` — which part numbers share a joint
 
 Open the STLs in Bambu Studio and arrange them. krack-up stops there.
+
+Tests:
+
+```bash
+.venv/bin/python -m unittest
+```

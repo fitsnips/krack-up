@@ -214,10 +214,10 @@ def open_folder(raw_path):
 
 def start_job(settings):
     checked = _check(settings)
-    save_settings(checked)
     with JOB.lock:
         if JOB.running:
             raise RuntimeError("A cut is already running")
+        save_settings(checked)
         JOB.running = True
         JOB.log = [f"Cutting {checked['input']}"]
         JOB.error = ""
@@ -262,7 +262,30 @@ def start_job(settings):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _local_hosts(self):
+        port = self.server.server_address[1]
+        names = {"127.0.0.1", "localhost", str(self.server.server_address[0])}
+        return {f"{name}:{port}" for name in names}
+
+    def _trusted(self):
+        """Only this page may drive the server.
+
+        The Host check stops DNS rebinding, where another site's name points
+        at 127.0.0.1 so its script can read the replies. The Origin and
+        Sec-Fetch-Site checks stop another site's page from posting here.
+        """
+        hosts = self._local_hosts()
+        if self.headers.get("Host", "") not in hosts:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in {f"http://{host}" for host in hosts}:
+            return False
+        return self.headers.get("Sec-Fetch-Site", "same-origin") in ("same-origin", "none")
+
     def do_GET(self):
+        if not self._trusted():
+            self._json(403, {"error": "Forbidden"})
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
@@ -300,11 +323,23 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "Not found"})
 
     def do_POST(self):
+        if not self._trusted():
+            self._json(403, {"error": "Forbidden"})
+            return
+        # A cross-site form or no-cors fetch cannot send this type without a
+        # CORS preflight, and the server never answers one.
+        content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            self._json(415, {"error": "Send JSON"})
+            return
         parsed = urlparse(self.path)
         try:
             payload = json.loads(self._read_body() or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             self._json(400, {"error": "Settings were not valid JSON"})
+            return
+        if not isinstance(payload, dict):
+            self._json(400, {"error": "Settings must be a JSON object"})
             return
         if parsed.path == "/api/config":
             try:
