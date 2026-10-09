@@ -72,22 +72,44 @@ def load_models(path):
     raise KrackError(f"unsupported file type: {path.suffix}")
 
 
-def write_3mf(path, objects):
-    """Write a plain 3MF. Objects are (name, verts, faces) already in print position."""
+def write_3mf(path, objects, layout=None, bed=None):
+    """Write a 3MF. Objects are (name, verts, faces) already in print position.
+
+    With `layout` (one (plate, x, y, turned) per object, from plates.pack)
+    and `bed`, each object goes on its plate and Bambu Studio reads the
+    plates from Metadata/model_settings.config. Without it they sit in a row.
+    """
+    from krackup.plates import plate_origin
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     resources = []
     items = []
     cursor_x = 0.0
+    count = 1 + max((spot[0] for spot in layout), default=0) if layout else 0
     for index, (name, verts, faces) in enumerate(objects, start=1):
         resources.append(_object_xml(index, name, verts, faces))
-        low = float(np.min(verts[:, 0])) if len(verts) else 0.0
-        high = float(np.max(verts[:, 0])) if len(verts) else 0.0
+        low = verts.min(axis=0) if len(verts) else np.zeros(3)
+        high = verts.max(axis=0) if len(verts) else np.zeros(3)
+        if layout:
+            plate, x, y, turned = layout[index - 1]
+            origin = plate_origin(plate, count, bed)
+            middle = (low + high) / 2
+            # Row-vector 3MF matrix; a turn sends +X to +Y.
+            matrix = "0 1 0 -1 0 0 0 0 1" if turned else "1 0 0 0 1 0 0 0 1"
+            if turned:
+                middle = np.array([-middle[1], middle[0], middle[2]])
+            move = (origin[0] + x - middle[0], origin[1] + y - middle[1], -low[2])
+            items.append(
+                f'<item objectid="{index}" transform="{matrix} '
+                f'{move[0]:.3f} {move[1]:.3f} {move[2]:.3f}"/>'
+            )
+            continue
         # Put this object's left edge at the cursor so neighbours never overlap.
         items.append(
-            f'<item objectid="{index}" transform="1 0 0 0 1 0 0 0 1 {cursor_x - low:.3f} 0 0"/>'
+            f'<item objectid="{index}" transform="1 0 0 0 1 0 0 0 1 {cursor_x - low[0]:.3f} 0 0"/>'
         )
-        cursor_x += (high - low) + 10.0
+        cursor_x += (high[0] - low[0]) + 10.0
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<model unit="millimeter" xml:lang="en-US" xmlns="{CORE}">\n'
@@ -115,6 +137,46 @@ def write_3mf(path, objects):
             "</Relationships>",
         )
         archive.writestr("3D/3dmodel.model", xml)
+        if layout:
+            archive.writestr("Metadata/model_settings.config", _plate_config(objects, layout, count))
+
+
+def _plate_config(objects, layout, count):
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<config>"]
+    for index, (name, _, _) in enumerate(objects, start=1):
+        safe = _escape(name)
+        lines += [
+            f'  <object id="{index}">',
+            f'    <metadata key="name" value="{safe}"/>',
+            '    <metadata key="extruder" value="1"/>',
+            f'    <part id="1" subtype="{SOLID_PART}">',
+            f'      <metadata key="name" value="{safe}"/>',
+            '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>',
+            "    </part>",
+            "  </object>",
+        ]
+    for plate in range(count):
+        lines += [
+            "  <plate>",
+            f'    <metadata key="plater_id" value="{plate + 1}"/>',
+            '    <metadata key="plater_name" value=""/>',
+            '    <metadata key="locked" value="false"/>',
+        ]
+        for index, spot in enumerate(layout, start=1):
+            if spot[0] == plate:
+                lines += [
+                    "    <model_instance>",
+                    f'      <metadata key="object_id" value="{index}"/>',
+                    '      <metadata key="instance_id" value="0"/>',
+                    "    </model_instance>",
+                ]
+        lines.append("  </plate>")
+    lines.append("</config>")
+    return "\n".join(lines) + "\n"
+
+
+def _escape(text):
+    return str(text).replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
 
 
 def _load_3mf(path):

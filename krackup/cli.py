@@ -87,7 +87,7 @@ def main(argv=None):
         action="store_false",
         help="do not engrave part numbers on the joint faces",
     )
-    parser.add_argument("--3mf", action="store_true", help="also write project.3mf")
+    parser.add_argument("--3mf", action="store_true", help="also write project.3mf with every part and dowel packed onto plates")
     parser.add_argument("--info", action="store_true", help="print part sizes and exit")
     parser.add_argument("--version", action="version", version=f"krack-up {__version__}")
     args = parser.parse_args(argv)

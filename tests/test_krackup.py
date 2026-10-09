@@ -194,6 +194,24 @@ class BedTest(unittest.TestCase):
         self.assertLessEqual(y, 194.4)
 
 
+class ProjectPlatesTest(unittest.TestCase):
+    def test_project_holds_parts_and_dowels_on_plates(self):
+        import zipfile
+
+        bar = mf.Manifold.cube((300, 50, 40), center=True)
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / "bar.stl"
+            out = Path(folder) / "out"
+            _write_solid(src, bar)
+            manifest = krack(src, out, "p1s", 10.0, 0.1, 100.0, True, log=lambda *_: None)
+            names = zipfile.ZipFile(out / "project.3mf").read("3D/3dmodel.model").decode()
+            text = (out / "ASSEMBLY.txt").read_text()
+        dowels = sum(item["count"] for item in manifest["dowels"])
+        self.assertEqual(names.count("<object "), len(manifest["parts"]) + dowels)
+        self.assertEqual(manifest["plates"], 1)
+        self.assertIn("on 1 plate.", text)
+
+
 class LabelTest(unittest.TestCase):
     def test_parts_get_a_number_on_the_joint_face(self):
         from krackup.labels import DEPTH, text_outline

@@ -3,8 +3,9 @@
 from krackup.solid import KrackError
 
 PRINTERS = {
-    "p1s": {"name": "Bambu Lab P1S", "bed": (256.0, 256.0, 250.0)},
-    "x1c": {"name": "Bambu Lab X1C", "bed": (256.0, 256.0, 256.0)},
+    # The corner at the origin is the nozzle wiper, from the Jimmy project settings.
+    "p1s": {"name": "Bambu Lab P1S", "bed": (256.0, 256.0, 250.0), "exclude": [(0.0, 0.0, 18.0, 28.0)]},
+    "x1c": {"name": "Bambu Lab X1C", "bed": (256.0, 256.0, 256.0), "exclude": [(0.0, 0.0, 18.0, 28.0)]},
     "a1": {"name": "Bambu Lab A1", "bed": (256.0, 256.0, 256.0)},
     "a1mini": {"name": "Bambu Lab A1 mini", "bed": (180.0, 180.0, 180.0)},
     "mini": {"name": "Prusa MINI", "bed": (180.0, 180.0, 180.0)},
@@ -42,6 +43,13 @@ def resolve(printer, bed=None):
     if printer not in PRINTERS:
         raise KrackError(f"unknown printer {printer!r}")
     return PRINTERS[printer]["name"], PRINTERS[printer]["bed"]
+
+
+def bed_exclude(printer, custom=False):
+    """Rectangles (x0, y0, x1, y1) on the bed where nothing may be placed."""
+    if custom or printer not in PRINTERS:
+        return []
+    return PRINTERS[printer].get("exclude", [])
 
 
 def usable_box(bed, margin_xy=MARGIN_XY, margin_z=MARGIN_Z):

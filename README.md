@@ -30,8 +30,9 @@ Output:
 - `parts/part_###.stl` — print these as exported, Z = 0 on the bed
 - `dowels/pentagon_R*_L10.stl` — print the count in `ASSEMBLY.txt`
 - `ASSEMBLY.txt` and `assembly.json` — which part numbers share a joint
+- `project.3mf` with `--3mf` — every part and dowel packed onto as few plates as fit, 6 mm apart and clear of the P1S/X1C wiper corner. Open it in Bambu Studio with the same printer selected; the plate grid follows the bed size
 
-Open the STLs in Bambu Studio and arrange them. krack-up stops there.
+krack-up stops at meshes; slice them yourself.
 
 Tests:
 

@@ -11,7 +11,8 @@ from krackup.labels import DEPTH, label_parts
 from krackup.meshio import load_models, write_3mf, write_stl
 from krackup.orient import place
 from krackup.pins import RADII, add_dowels, dowel_solid
-from krackup.printers import MARGIN_XY, MARGIN_Z, resolve, usable_box
+from krackup.plates import pack
+from krackup.printers import MARGIN_XY, MARGIN_Z, bed_exclude, resolve, usable_box
 from krackup.solid import KrackError, manifold_from, mesh_arrays
 from krackup.split import split_to_fit
 
@@ -57,6 +58,7 @@ def krack(
     should_stop=None,
     log=print,
 ):
+    custom = bed is not None
     printer_name, bed = resolve(printer, bed)
     limit = np.array(usable_box(bed, margin_xy, margin_z), dtype=np.float64)
     output = Path(output)
@@ -200,6 +202,15 @@ def krack(
             {"file": f"dowels/{filename}", "radius_mm": radius, "length_mm": pin_length, "count": count}
         )
         log(f"dowel {filename} x{count}")
+        stem = filename[: -len(".stl")]
+        project.extend((f"{stem}_{n}.stl", verts, faces) for n in range(1, count + 1))
+
+    layout = None
+    plates = 0
+    if write_project and project:
+        sizes = [tuple(np.ptp(verts[:, :2], axis=0)) for _, verts, _ in project]
+        layout = pack(sizes, bed, margin_xy / 2, exclude=bed_exclude(printer, custom))
+        plates = 1 + max(spot[0] for spot in layout)
 
     manifest = {
         "source": str(path),
@@ -226,12 +237,14 @@ def krack(
         "parts": manifest_parts,
         "joints": all_joints,
         "dowels": dowel_files,
+        "plates": plates,
         "gcode": False,
     }
     (output / "assembly.json").write_text(json.dumps(manifest, indent=2))
     (output / "ASSEMBLY.txt").write_text(_text(manifest))
-    if write_project and project:
-        write_3mf(output / "project.3mf", project)
+    if layout:
+        write_3mf(output / "project.3mf", project, layout=layout, bed=bed)
+        log(f"project.3mf: {len(project)} objects on {_plates(plates)}")
     return manifest
 
 
@@ -246,6 +259,10 @@ def _joint(source, joint_id, reason, area, pins, id_by_piece):
         "parts_a": sorted({id_by_piece[id(pin["positive"])] for pin in pins}),
         "parts_b": sorted({id_by_piece[id(pin["negative"])] for pin in pins}),
     }
+
+
+def _plates(count):
+    return f"{count} plate" if count == 1 else f"{count} plates"
 
 
 def _label_lines(labels):
@@ -290,6 +307,11 @@ def _text(manifest):
         "",
         "Print each part in the pose it was exported. Z = 0 is the bed.",
         *_label_lines(manifest["labels"]),
+        *(
+            [f"project.3mf has every part and dowel laid out on {_plates(manifest['plates'])}."]
+            if manifest["plates"]
+            else []
+        ),
         "This folder is meshes only. It is not gcode.",
         "",
         "Joints:",
