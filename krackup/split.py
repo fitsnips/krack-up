@@ -155,20 +155,22 @@ def _choose_plane(solid, limit):
 
 def _axes(points, limit):
     world = points.max(axis=0) - points.min(axis=0)
+    # A piece may land either way round, so plan for the short side of the bed.
+    flat = min(limit[0], limit[1])
     axes = []
     for index, name in enumerate(("worldX", "worldY", "worldZ")):
-        cap = limit[2] if index == 2 else limit[0]
+        cap = limit[2] if index == 2 else flat
         if world[index] > cap + 0.5:
             direction = np.zeros(3)
             direction[index] = 1.0
             axes.append((direction, cap, name))
     _, pca_axes, pca_ext = pca(points)
-    over = pca_ext > (limit[0] + 0.5)
+    over = pca_ext > (flat + 0.5)
     for index in range(3):
         too_tall = pca_ext[index] > limit[2] + 0.5
-        blocks = pca_ext[index] > limit[0] + 0.5 and int(np.count_nonzero(over)) >= 2
-        if too_tall or blocks or (index == 0 and pca_ext[0] > limit[0] + 0.5):
-            cap = limit[2] if index == 0 else limit[0]
+        blocks = pca_ext[index] > flat + 0.5 and int(np.count_nonzero(over)) >= 2
+        if too_tall or blocks or (index == 0 and pca_ext[0] > flat + 0.5):
+            cap = limit[2] if index == 0 else flat
             axes.append((pca_axes[:, index], cap, f"pca{index}"))
     return axes
 

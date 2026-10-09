@@ -46,7 +46,9 @@ class KrackUpTest(unittest.TestCase):
             src = Path(folder) / "bar.stl"
             out = Path(folder) / "out"
             write_stl(src, verts, faces)
-            manifest = krack(src, out, "p1s", 10.0, 0.1, 50.0, write_project=False, log=lambda *_: None)
+            manifest = krack(
+                src, out, "p1s", 10.0, 0.1, 50.0, write_project=False, labels=False, log=lambda *_: None,
+            )
             self.assertEqual(len(manifest["parts"]), 2)
             for part in manifest["parts"]:
                 x, y, z = part["print_size_mm"]
@@ -142,6 +144,106 @@ class KrackUpTest(unittest.TestCase):
             manifest = krack(src, Path(folder) / "out", "p1s", 10.0, 0.1, 100.0, False, log=messages.append)
         self.assertEqual(manifest["dowels"], [])
         self.assertTrue(any("could not be cut" in line for line in messages))
+
+
+class BedTest(unittest.TestCase):
+    def test_bed_text_is_parsed(self):
+        from krackup.printers import parse_bed
+
+        self.assertEqual(parse_bed("300x320x250"), (300.0, 320.0, 250.0))
+        self.assertEqual(parse_bed("300 × 300 × 300"), (300.0, 300.0, 300.0))
+        for bad in ("300x300", "axbxc", "0x300x300"):
+            with self.assertRaises(ValueError):
+                parse_bed(bad)
+
+    def test_custom_bed_and_margins_set_the_usable_box(self):
+        slab = mf.Manifold.cube((290, 290, 40), center=True)
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / "slab.stl"
+            _write_solid(src, slab)
+            manifest = krack(
+                src, Path(folder) / "out", "p1s", 10.0, 0.1, 100.0, False,
+                bed=(320.0, 320.0, 300.0), margin_xy=10.0, margin_z=0.0, log=lambda *_: None,
+            )
+        self.assertEqual(manifest["printer"], "Custom")
+        self.assertEqual(manifest["usable_mm"], [310.0, 310.0, 300.0])
+        self.assertEqual(manifest["margin_xy_mm"], 10.0)
+        self.assertEqual(len(manifest["parts"]), 1)
+
+    def test_margins_that_leave_no_room_are_an_error(self):
+        from krackup.solid import KrackError
+
+        bar = mf.Manifold.cube((300, 50, 40), center=True)
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / "bar.stl"
+            _write_solid(src, bar)
+            with self.assertRaises(KrackError):
+                krack(src, Path(folder) / "out", "mini", 10.0, 0.1, 100.0, False,
+                      margin_xy=120.0, log=lambda *_: None)
+
+    def test_long_part_turns_to_the_long_side_of_the_bed(self):
+        # MK4 usable is 234 x 194. The slab is 230 along Y, so it has to turn.
+        slab = mf.Manifold.cube((180, 230, 20), center=True)
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / "slab.stl"
+            _write_solid(src, slab)
+            manifest = krack(src, Path(folder) / "out", "mk4", 10.0, 0.1, 100.0, False, log=lambda *_: None)
+        self.assertEqual(len(manifest["parts"]), 1)
+        x, y, _ = manifest["parts"][0]["print_size_mm"]
+        self.assertLessEqual(x, 234.4)
+        self.assertLessEqual(y, 194.4)
+
+
+class LabelTest(unittest.TestCase):
+    def test_parts_get_a_number_on_the_joint_face(self):
+        from krackup.labels import DEPTH, text_outline
+
+        bar = mf.Manifold.cube((300, 50, 40), center=True)
+        volumes = {}
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / "bar.stl"
+            _write_solid(src, bar)
+            for labels in (False, True):
+                out = Path(folder) / f"out-{labels}"
+                manifest = krack(src, out, "p1s", 10.0, 0.1, 100.0, False, labels=labels, log=lambda *_: None)
+                volumes[labels] = [_stl_volume(out / part["file"]) for part in manifest["parts"]]
+            text = (out / "ASSEMBLY.txt").read_text()
+        self.assertEqual(manifest["labels"]["unlabeled_parts"], [])
+        self.assertIn("engraved", text)
+        # Each part lost about one digit and its bar, DEPTH deep.
+        for part, (plain, marked) in enumerate(zip(volumes[False], volumes[True]), start=1):
+            expected = text_outline(str(part), 10.0).area * DEPTH
+            self.assertAlmostEqual(plain - marked, expected, delta=0.25 * expected)
+
+    def test_number_reads_from_outside_the_face(self):
+        from shapely.geometry import Point
+
+        from krackup.labels import label_parts
+        from krackup.pins import _section_shape
+        from krackup.split import Piece
+
+        bar = mf.Manifold.cube((200, 60, 40), center=True)
+        pos, neg = bar.split_by_plane([1.0, 0.0, 0.0], 0.0)
+        cut = {"id": 0, "normal": [1.0, 0.0, 0.0], "offset": 0.0}
+        records = [
+            {"id": 1, "piece": Piece(pos, [0]), "cuts": [cut], "holes": []},
+            {"id": 1, "piece": Piece(neg, [0]), "cuts": [cut], "holes": []},
+        ]
+        self.assertEqual(label_parts(records, log=lambda *_: None), [])
+        frame = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
+        for record, side in zip(records, (1.0, -1.0)):
+            solid = record["piece"].solid
+            face = _section_shape(solid, frame, side * 0.3)
+            inside = _section_shape(solid, frame, side * 2.0)
+            label = inside.difference(face)
+            minx, miny, maxx, maxy = label.bounds
+            # A seven-segment 1 is the two right-hand strokes. Seen from
+            # outside, "right" is -Y on the +X half and +Y on the -X half.
+            right = minx + 0.1 * (maxx - minx) if side > 0 else maxx - 0.1 * (maxx - minx)
+            left = maxx - 0.1 * (maxx - minx) if side > 0 else minx + 0.1 * (maxx - minx)
+            middle = miny + 0.6 * (maxy - miny)
+            self.assertTrue(label.contains(Point(right, middle)))
+            self.assertFalse(label.contains(Point(left, middle)))
 
 
 class OrientTest(unittest.TestCase):

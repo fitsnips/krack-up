@@ -7,10 +7,11 @@ from pathlib import Path
 import numpy as np
 
 from krackup.faces import pin_existing_faces
+from krackup.labels import DEPTH, label_parts
 from krackup.meshio import load_models, write_3mf, write_stl
 from krackup.orient import place
 from krackup.pins import RADII, add_dowels, dowel_solid
-from krackup.printers import MARGIN_XY, MARGIN_Z, PRINTERS, usable_box
+from krackup.printers import MARGIN_XY, MARGIN_Z, resolve, usable_box
 from krackup.solid import KrackError, manifold_from, mesh_arrays
 from krackup.split import split_to_fit
 
@@ -49,11 +50,15 @@ def krack(
     write_project,
     min_pins=2,
     scale=1.0,
+    bed=None,
+    margin_xy=MARGIN_XY,
+    margin_z=MARGIN_Z,
+    labels=True,
     should_stop=None,
     log=print,
 ):
-    limit = np.array(usable_box(printer), dtype=np.float64)
-    bed = PRINTERS[printer]["bed"]
+    printer_name, bed = resolve(printer, bed)
+    limit = np.array(usable_box(bed, margin_xy, margin_z), dtype=np.float64)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     part_dir = output / "parts"
@@ -90,24 +95,23 @@ def krack(
         file_pins = pin_existing_faces(every_piece, length, tolerance, pitch, min_pins, log=emit)
         all_pins.extend(file_pins)
 
+    holes_by_piece = {}
+    for pin in all_pins:
+        for hole in pin["holes"]:
+            holes_by_piece.setdefault(id(hole["piece"]), []).append(hole)
     records = []
     part_index = 1
     for source_name, pieces, cuts, _, _ in pending:
-        group = []
-        for piece in pieces:
-            normals = [cuts[i]["normal"] for i in piece.cuts]
-            posed = place(piece.solid, normals, limit)
-            if posed is None:
-                size = piece.solid.bounding_box()
-                raise KrackError(f"a piece of {source_name} does not fit: {size}")
-            group.append(
-                {
-                    "source": source_name,
-                    "piece": piece,
-                    "posed": posed,
-                    "centroid": _centroid(piece.solid),
-                }
-            )
+        group = [
+            {
+                "source": source_name,
+                "piece": piece,
+                "cuts": [cuts[i] for i in piece.cuts],
+                "holes": holes_by_piece.get(id(piece), []),
+                "centroid": _centroid(piece.solid),
+            }
+            for piece in pieces
+        ]
         # Number the parts of each source bottom to top.
         group.sort(key=lambda rec: (rec["centroid"][2], rec["centroid"][0]))
         for rec in group:
@@ -115,6 +119,19 @@ def krack(
             part_index += 1
         records.extend(group)
     id_by_piece = {id(rec["piece"]): rec["id"] for rec in records}
+
+    unlabeled = []
+    if labels and len(records) > 1:
+        emit("engraving part numbers")
+        unlabeled = label_parts(records, log=emit)
+    for rec in records:
+        piece = rec["piece"]
+        normals = [cut["normal"] for cut in rec["cuts"]]
+        posed = place(piece.solid, normals, limit)
+        if posed is None:
+            size = piece.solid.bounding_box()
+            raise KrackError(f"a piece of {rec['source']} does not fit: {size}")
+        rec["posed"] = posed
 
     all_joints = []
     for source_name, _, cuts, pins, areas in pending:
@@ -181,11 +198,16 @@ def krack(
 
     manifest = {
         "source": str(path),
-        "printer": PRINTERS[printer]["name"],
+        "printer": printer_name,
         "bed_mm": list(bed),
         "usable_mm": [round(float(v), 1) for v in limit],
-        "margin_xy_mm": MARGIN_XY,
-        "margin_z_mm": MARGIN_Z,
+        "margin_xy_mm": margin_xy,
+        "margin_z_mm": margin_z,
+        "labels": {
+            "engraved": bool(labels and len(records) > 1),
+            "depth_mm": DEPTH,
+            "unlabeled_parts": unlabeled,
+        },
         "dowel": {
             "shape": "pentagon",
             "length_mm": length,
@@ -221,6 +243,18 @@ def _joint(source, joint_id, reason, area, pins, id_by_piece):
     }
 
 
+def _label_lines(labels):
+    if not labels["engraved"]:
+        return []
+    lines = [
+        f"Each part number is engraved {labels['depth_mm']:g} mm deep on one of its "
+        "joint faces, with a bar under the digits.",
+    ]
+    if labels["unlabeled_parts"]:
+        lines.append(f"No room for a number on parts {labels['unlabeled_parts']}.")
+    return lines
+
+
 def _centroid(solid):
     verts, _ = mesh_arrays(solid)
     return verts.mean(axis=0)
@@ -250,6 +284,7 @@ def _text(manifest):
         "Sockets are cut into both faces. The dowels are separate STLs.",
         "",
         "Print each part in the pose it was exported. Z = 0 is the bed.",
+        *_label_lines(manifest["labels"]),
         "This folder is meshes only. It is not gcode.",
         "",
         "Joints:",

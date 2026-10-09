@@ -7,6 +7,7 @@ from krackup.solid import mesh_arrays
 from krackup.split import orientations_for
 
 OVERHANG = 45.0
+QUARTER_TURN = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
 
 def place(solid, normals, limit):
@@ -17,6 +18,11 @@ def place(solid, normals, limit):
         size = rotated.max(axis=0) - rotated.min(axis=0)
         if not fits(size, limit):
             continue
+        if limit[0] != limit[1] and (size[0] > size[1]) != (limit[0] > limit[1]):
+            # Quarter turn about Z so the long side runs along the long side of the bed.
+            frame = QUARTER_TURN @ frame
+            rotated = verts @ frame.T
+            size = rotated.max(axis=0) - rotated.min(axis=0)
         placed = rotated.copy()
         low = placed.min(axis=0)
         high = placed.max(axis=0)
