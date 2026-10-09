@@ -19,9 +19,12 @@ def extents(bounds):
 
 
 def fits(ext, limit):
+    """True when the box fits, allowing a quarter turn on the bed."""
+    ext_xy = sorted((ext[0], ext[1]))
+    limit_xy = sorted((limit[0], limit[1]))
     return (
-        ext[0] <= limit[0] + 0.4
-        and ext[1] <= limit[1] + 0.4
+        ext_xy[0] <= limit_xy[0] + 0.4
+        and ext_xy[1] <= limit_xy[1] + 0.4
         and ext[2] <= limit[2] + 0.4
     )
 

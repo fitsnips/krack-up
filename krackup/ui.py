@@ -9,17 +9,22 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from krackup.meshio import load_models
-from krackup.printers import DEFAULT_PRINTER, PRINTERS
+from krackup.printers import DEFAULT_PRINTER, MARGIN_XY, MARGIN_Z, PRINTERS
 from krackup.run import Stopped, krack
 
 PAGE = Path(__file__).with_name("ui_page.html").read_text(encoding="utf-8")
 CONFIG_PATH = Path.home() / ".config" / "krack-up" / "settings.json"
 MODEL_SUFFIXES = {".stl", ".3mf"}
+CUSTOM = "custom"
 
 DEFAULTS = {
     "input": "",
     "output": "",
     "printer": DEFAULT_PRINTER,
+    "bed": [300.0, 300.0, 300.0],
+    "margin_xy": MARGIN_XY,
+    "margin_z": MARGIN_Z,
+    "labels": True,
     "pitch": 100.0,
     "min_pins": 2,
     "length": 10.0,
@@ -154,8 +159,18 @@ def _numbers(settings):
     length = float(settings.get("length", 10))
     tolerance = float(settings.get("tolerance", 0.1))
     printer = str(settings.get("printer", DEFAULT_PRINTER))
-    if printer not in PRINTERS:
+    if printer != CUSTOM and printer not in PRINTERS:
         raise ValueError("Unknown printer")
+    bed = settings.get("bed", DEFAULTS["bed"])
+    if not isinstance(bed, (list, tuple)) or len(bed) != 3:
+        raise ValueError("Bed size needs width, depth, and height")
+    bed = [float(value) for value in bed]
+    if printer == CUSTOM and min(bed) <= 0:
+        raise ValueError("Bed sizes must be greater than 0")
+    margin_xy = float(settings.get("margin_xy", MARGIN_XY))
+    margin_z = float(settings.get("margin_z", MARGIN_Z))
+    if margin_xy < 0 or margin_z < 0:
+        raise ValueError("Margins cannot be negative")
     if pitch <= 0:
         raise ValueError("Dowel spacing must be greater than 0")
     if min_pins < 1:
@@ -172,6 +187,10 @@ def _numbers(settings):
         "input": str(settings.get("input", "")).strip(),
         "output": str(settings.get("output", "")).strip(),
         "printer": printer,
+        "bed": bed,
+        "margin_xy": margin_xy,
+        "margin_z": margin_z,
+        "labels": bool(settings.get("labels", True)),
         "pitch": pitch,
         "min_pins": min_pins,
         "length": length,
@@ -214,10 +233,10 @@ def open_folder(raw_path):
 
 def start_job(settings):
     checked = _check(settings)
-    save_settings(checked)
     with JOB.lock:
         if JOB.running:
             raise RuntimeError("A cut is already running")
+        save_settings(checked)
         JOB.running = True
         JOB.log = [f"Cutting {checked['input']}"]
         JOB.error = ""
@@ -235,6 +254,10 @@ def start_job(settings):
                 checked["input"],
                 checked["output"],
                 printer=checked["printer"],
+                bed=checked["bed"] if checked["printer"] == CUSTOM else None,
+                margin_xy=checked["margin_xy"],
+                margin_z=checked["margin_z"],
+                labels=checked["labels"],
                 length=checked["length"],
                 tolerance=checked["tolerance"],
                 pitch=checked["pitch"],
@@ -262,7 +285,30 @@ def start_job(settings):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _local_hosts(self):
+        port = self.server.server_address[1]
+        names = {"127.0.0.1", "localhost", str(self.server.server_address[0])}
+        return {f"{name}:{port}" for name in names}
+
+    def _trusted(self):
+        """Only this page may drive the server.
+
+        The Host check stops DNS rebinding, where another site's name points
+        at 127.0.0.1 so its script can read the replies. The Origin and
+        Sec-Fetch-Site checks stop another site's page from posting here.
+        """
+        hosts = self._local_hosts()
+        if self.headers.get("Host", "") not in hosts:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in {f"http://{host}" for host in hosts}:
+            return False
+        return self.headers.get("Sec-Fetch-Site", "same-origin") in ("same-origin", "none")
+
     def do_GET(self):
+        if not self._trusted():
+            self._json(403, {"error": "Forbidden"})
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
@@ -300,11 +346,23 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "Not found"})
 
     def do_POST(self):
+        if not self._trusted():
+            self._json(403, {"error": "Forbidden"})
+            return
+        # A cross-site form or no-cors fetch cannot send this type without a
+        # CORS preflight, and the server never answers one.
+        content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            self._json(415, {"error": "Send JSON"})
+            return
         parsed = urlparse(self.path)
         try:
             payload = json.loads(self._read_body() or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             self._json(400, {"error": "Settings were not valid JSON"})
+            return
+        if not isinstance(payload, dict):
+            self._json(400, {"error": "Settings must be a JSON object"})
             return
         if parsed.path == "/api/config":
             try:

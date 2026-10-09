@@ -55,6 +55,8 @@
   }
   input, select { width: 100%; padding: 7px 8px; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .row3[hidden] { display: none; }
   .check { display: flex; gap: 8px; align-items: center; margin-top: 12px; color: var(--text); }
   .check input { width: auto; }
   button {
@@ -140,6 +142,30 @@
     <input id="output" spellcheck="false">
     <label for="printer">Printer</label>
     <select id="printer"></select>
+    <div class="row3" id="custom-bed" hidden>
+      <div>
+        <label for="bed-x">Bed width (mm)</label>
+        <input id="bed-x" type="number" min="1" step="1" value="300">
+      </div>
+      <div>
+        <label for="bed-y">Bed depth (mm)</label>
+        <input id="bed-y" type="number" min="1" step="1" value="300">
+      </div>
+      <div>
+        <label for="bed-z">Height (mm)</label>
+        <input id="bed-z" type="number" min="1" step="1" value="300">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="margin-xy">Bed margin, sides (mm)</label>
+        <input id="margin-xy" type="number" min="0" step="1" value="16">
+      </div>
+      <div>
+        <label for="margin-z">Bed margin, height (mm)</label>
+        <input id="margin-z" type="number" min="0" step="1" value="6">
+      </div>
+    </div>
     <div class="row">
       <div>
         <label for="every">One dowel every (mm)</label>
@@ -163,7 +189,8 @@
     <label for="scale">Scale before cutting</label>
     <input id="scale" type="number" min="0.01" step="0.01" value="1">
     <pre id="dimensions">Pick a model to see its size.</pre>
-    <label class="check"><input id="write-3mf" type="checkbox"> Also write project.3mf</label>
+    <label class="check"><input id="labels" type="checkbox" checked> Engrave part numbers on joint faces</label>
+    <label class="check"><input id="write-3mf" type="checkbox"> Also write project.3mf, laid out on plates</label>
     <div class="actions">
       <button id="save" class="ghost" type="button">Save settings</button>
       <button id="open-output" class="ghost" type="button">Open output folder</button>
@@ -197,8 +224,21 @@ async function loadConfig() {
     option.textContent = `${item.name}  ${item.bed.join(" × ")} mm`;
     printer.appendChild(option);
   }
+  const custom = document.createElement("option");
+  custom.value = "custom";
+  custom.textContent = "Custom bed size";
+  printer.appendChild(custom);
+  printer.onchange = showCustomBed;
   const cfg = data.settings;
   printer.value = cfg.printer;
+  const bed = cfg.bed || [300, 300, 300];
+  $("bed-x").value = bed[0];
+  $("bed-y").value = bed[1];
+  $("bed-z").value = bed[2];
+  $("margin-xy").value = cfg.margin_xy ?? 16;
+  $("margin-z").value = cfg.margin_z ?? 6;
+  $("labels").checked = cfg.labels ?? true;
+  showCustomBed();
   $("every").value = cfg.pitch;
   $("min-pins").value = cfg.min_pins;
   $("length").value = cfg.length;
@@ -212,11 +252,19 @@ async function loadConfig() {
   if (picked) await loadDimensions(picked);
 }
 
+function showCustomBed() {
+  $("custom-bed").hidden = $("printer").value !== "custom";
+}
+
 function settingsFromForm() {
   return {
     input: $("input-file").value.trim(),
     output: $("output").value.trim(),
     printer: $("printer").value,
+    bed: [Number($("bed-x").value), Number($("bed-y").value), Number($("bed-z").value)],
+    margin_xy: Number($("margin-xy").value),
+    margin_z: Number($("margin-z").value),
+    labels: $("labels").checked,
     pitch: Number($("every").value),
     min_pins: Number($("min-pins").value),
     length: Number($("length").value),
