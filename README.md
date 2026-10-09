@@ -30,7 +30,9 @@ Output:
 - `parts/part_###.stl` — print these as exported, Z = 0 on the bed
 - `dowels/pentagon_R*_L10.stl` — print the count in `ASSEMBLY.txt`
 - `ASSEMBLY.txt` and `assembly.json` — which part numbers share a joint
-- `project.3mf` with `--3mf` — every part and dowel packed onto as few plates as fit, 6 mm apart and clear of the P1S/X1C wiper corner. Open it in Bambu Studio with the same printer selected; the plate grid follows the bed size
+- `project.3mf` with `--3mf` — every part and dowel packed onto as few plates as fit, clear of the P1S/X1C wiper corner
+  - for a Bambu printer (P1S, X1C, A1, A1 mini) it is a Bambu Studio project: printer, process, and filament are set and the plates are filled. The settings come from the input 3MF when it is a Bambu project for the same printer, otherwise from the Bambu Studio profiles installed on this computer (`KRACKUP_BAMBU_PROFILES` points at another `profiles` folder). Parts are spaced for the brim and supports in those settings
+  - for other printers, or when no Bambu settings are found, it is a plain 3MF; open it with the same printer selected so the plates line up
 
 krack-up stops at meshes; slice them yourself.
 

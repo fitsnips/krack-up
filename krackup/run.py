@@ -6,12 +6,13 @@ from pathlib import Path
 
 import numpy as np
 
+from krackup.bambu import project_settings, spacing, write_project as write_bambu_project
 from krackup.faces import pin_existing_faces
 from krackup.labels import DEPTH, label_parts
 from krackup.meshio import load_models, write_3mf, write_stl
 from krackup.orient import place
 from krackup.pins import RADII, add_dowels, dowel_solid
-from krackup.plates import pack
+from krackup.plates import GAP, pack
 from krackup.printers import MARGIN_XY, MARGIN_Z, bed_exclude, resolve, usable_box
 from krackup.solid import KrackError, manifold_from, mesh_arrays
 from krackup.split import split_to_fit
@@ -207,9 +208,12 @@ def krack(
 
     layout = None
     plates = 0
+    found = None
     if write_project and project:
+        found = None if custom else project_settings(printer, path)
         sizes = [tuple(np.ptp(verts[:, :2], axis=0)) for _, verts, _ in project]
-        layout = pack(sizes, bed, margin_xy / 2, exclude=bed_exclude(printer, custom))
+        gap = spacing(found[0] if found else None, GAP)
+        layout = pack(sizes, bed, margin_xy / 2, exclude=bed_exclude(printer, custom), gap=gap)
         plates = 1 + max(spot[0] for spot in layout)
 
     manifest = {
@@ -243,8 +247,13 @@ def krack(
     (output / "assembly.json").write_text(json.dumps(manifest, indent=2))
     (output / "ASSEMBLY.txt").write_text(_text(manifest))
     if layout:
-        write_3mf(output / "project.3mf", project, layout=layout, bed=bed)
-        log(f"project.3mf: {len(project)} objects on {_plates(plates)}")
+        if found is None:
+            write_3mf(output / "project.3mf", project, layout=layout, bed=bed)
+            log(f"project.3mf: {len(project)} objects on {_plates(plates)}, no Bambu settings")
+        else:
+            settings, where = found
+            write_bambu_project(output / "project.3mf", project, layout, bed, settings, title=Path(path).stem)
+            log(f"project.3mf: Bambu project, {len(project)} objects on {_plates(plates)}, {where}")
     return manifest
 
 
