@@ -33,7 +33,8 @@ def label_parts(records, log=print):
         faces = _faces(piece, rec.get("holes", []), rec.get("cuts", []))
         if not faces:
             continue
-        if not _engrave(piece, str(rec["id"]), faces):
+        pose = rec["posed"]["frame"] if "posed" in rec else None
+        if not _engrave(piece, str(rec["id"]), faces, pose):
             missed.append(rec["id"])
     if missed:
         log(f"no room for a label on parts {missed}")
@@ -96,23 +97,29 @@ def _faces(piece, holes, cuts):
     return found
 
 
-def _engrave(piece, text, faces):
-    regions = []
+def _engrave(piece, text, faces, pose=None):
+    """`pose` turns the piece into its print position. A face on the bed
+    hides its number in the slicer, so it is the last choice."""
+    regions = ([], [])
     for frame, offset, side in faces:
         region = _room(piece.solid, frame, offset, side)
-        if region is not None:
-            regions.append((region.area, region, frame, offset, side))
-    regions.sort(key=lambda item: item[0], reverse=True)
-    for height in HEIGHTS:
-        outline = text_outline(text, height)
-        for _, region, frame, offset, side in regions:
-            placed = _place(outline, region, side)
-            if placed is None:
-                continue
-            carved = _cut(piece.solid, _tool(placed, frame, offset, side))
-            if carved is not None:
-                piece.solid = carved
-                return True
+        if region is None:
+            continue
+        outward = -side * np.asarray(frame)[2]
+        down = pose is not None and float((np.asarray(pose) @ outward)[2]) < -0.7
+        regions[down].append((region.area, region, frame, offset, side))
+    for group in regions:
+        group.sort(key=lambda item: item[0], reverse=True)
+        for height in HEIGHTS:
+            outline = text_outline(text, height)
+            for _, region, frame, offset, side in group:
+                placed = _place(outline, region, side)
+                if placed is None:
+                    continue
+                carved = _cut(piece.solid, _tool(placed, frame, offset, side))
+                if carved is not None:
+                    piece.solid = carved
+                    return True
     return False
 
 

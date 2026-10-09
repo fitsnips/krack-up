@@ -120,18 +120,23 @@ def krack(
         records.extend(group)
     id_by_piece = {id(rec["piece"]): rec["id"] for rec in records}
 
-    unlabeled = []
-    if labels and len(records) > 1:
-        emit("engraving part numbers")
-        unlabeled = label_parts(records, log=emit)
     for rec in records:
         piece = rec["piece"]
-        normals = [cut["normal"] for cut in rec["cuts"]]
-        posed = place(piece.solid, normals, limit)
+        posed = place(piece.solid, [cut["normal"] for cut in rec["cuts"]], limit)
         if posed is None:
             size = piece.solid.bounding_box()
             raise KrackError(f"a piece of {rec['source']} does not fit: {size}")
         rec["posed"] = posed
+    unlabeled = []
+    if labels and len(records) > 1:
+        emit("engraving part numbers")
+        # Pose first, so the number can go on a face that is not on the bed.
+        unlabeled = label_parts(records, log=emit)
+        for rec in records:
+            normals = [cut["normal"] for cut in rec["cuts"]]
+            posed = place(rec["piece"].solid, normals, limit, only=rec["posed"]["name"])
+            if posed is not None:
+                rec["posed"] = posed
 
     all_joints = []
     for source_name, _, cuts, pins, areas in pending:
