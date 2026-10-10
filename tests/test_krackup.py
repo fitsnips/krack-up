@@ -213,8 +213,8 @@ class ProjectPlatesTest(unittest.TestCase):
 
 
 class LabelTest(unittest.TestCase):
-    def test_parts_get_a_number_on_the_joint_face(self):
-        from krackup.labels import DEPTH, text_outline
+    def test_each_joint_face_gets_own_and_mate_number(self):
+        from krackup.labels import DEPTH, HEIGHTS, text_outline
 
         bar = mf.Manifold.cube((300, 50, 40), center=True)
         volumes = {}
@@ -226,42 +226,82 @@ class LabelTest(unittest.TestCase):
                 manifest = krack(src, out, "p1s", 10.0, 0.1, 100.0, False, labels=labels, log=lambda *_: None)
                 volumes[labels] = [_stl_volume(out / part["file"]) for part in manifest["parts"]]
             text = (out / "ASSEMBLY.txt").read_text()
-        self.assertEqual(manifest["labels"]["unlabeled_parts"], [])
-        self.assertIn("engraved", text)
-        # Each part lost about one digit and its bar, DEPTH deep.
+        report = manifest["labels"]
+        self.assertEqual(report["labeled_faces"], 2)
+        self.assertEqual(report["unlabeled_faces"], [])
+        self.assertEqual(report["parts_without_joints"], [])
+        self.assertIn("3-5 is on part 3", text)
+        # Part 1 reads 1-2 and part 2 reads 2-1, DEPTH deep, at one of the
+        # label heights.
         for part, (plain, marked) in enumerate(zip(volumes[False], volumes[True]), start=1):
-            expected = text_outline(str(part), 10.0).area * DEPTH
-            self.assertAlmostEqual(plain - marked, expected, delta=0.25 * expected)
+            outline = f"{part}-{3 - part}"
+            smallest = text_outline(outline, min(HEIGHTS)).area * DEPTH
+            largest = text_outline(outline, max(HEIGHTS)).area * DEPTH
+            self.assertGreater(plain - marked, 0.75 * smallest)
+            self.assertLess(plain - marked, 1.25 * largest)
 
-    def test_number_reads_from_outside_the_face(self):
+    def test_label_reads_from_outside_the_face(self):
         from shapely.geometry import Point
 
-        from krackup.labels import label_parts
+        from krackup.labels import cut_faces, label_joints
         from krackup.pins import _section_shape
         from krackup.split import Piece
 
         bar = mf.Manifold.cube((200, 60, 40), center=True)
         pos, neg = bar.split_by_plane([1.0, 0.0, 0.0], 0.0)
+        pieces = [Piece(pos, [0]), Piece(neg, [0])]
         cut = {"id": 0, "normal": [1.0, 0.0, 0.0], "offset": 0.0}
-        records = [
-            {"id": 1, "piece": Piece(pos, [0]), "cuts": [cut], "holes": []},
-            {"id": 1, "piece": Piece(neg, [0]), "cuts": [cut], "holes": []},
-        ]
-        self.assertEqual(label_parts(records, log=lambda *_: None), [])
+        ids = {id(pieces[0]): 1, id(pieces[1]): 7}
+        faces = cut_faces(pieces, [cut])
+        self.assertEqual(len(faces), 2)
+        labeled, short, missing = label_joints(faces, ids, log=lambda *_: None)
+        self.assertEqual((labeled, short, missing), (2, [], []))
         frame = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
-        for record, side in zip(records, (1.0, -1.0)):
-            solid = record["piece"].solid
-            face = _section_shape(solid, frame, side * 0.3)
-            inside = _section_shape(solid, frame, side * 2.0)
-            label = inside.difference(face)
+        for piece, side in zip(pieces, (1.0, -1.0)):
+            label = _section_shape(piece.solid, frame, side * 2.0).difference(
+                _section_shape(piece.solid, frame, side * 0.3)
+            )
             minx, miny, maxx, maxy = label.bounds
-            # A seven-segment 1 is the two right-hand strokes. Seen from
+            # "1-7" and "7-1": the left edge has no upper stroke (1 is its
+            # right strokes, 7 has no f), the right edge has one. Seen from
             # outside, "right" is -Y on the +X half and +Y on the -X half.
-            right = minx + 0.1 * (maxx - minx) if side > 0 else maxx - 0.1 * (maxx - minx)
-            left = maxx - 0.1 * (maxx - minx) if side > 0 else minx + 0.1 * (maxx - minx)
-            middle = miny + 0.6 * (maxy - miny)
+            near_min = minx + 0.02 * (maxx - minx)
+            near_max = maxx - 0.02 * (maxx - minx)
+            right, left = (near_min, near_max) if side > 0 else (near_max, near_min)
+            middle = miny + 0.7 * (maxy - miny)
             self.assertTrue(label.contains(Point(right, middle)))
             self.assertFalse(label.contains(Point(left, middle)))
+
+    def test_face_meeting_two_parts_gets_a_label_for_each(self):
+        from krackup.labels import cut_faces, label_joints
+        from krackup.split import Piece
+
+        slab = mf.Manifold.cube((200, 80, 30)).translate((-100, -40, 0))
+        left = mf.Manifold.cube((80, 80, 30)).translate((-100, -40, -30))
+        right = mf.Manifold.cube((80, 80, 30)).translate((20, -40, -30))
+        pieces = [Piece(slab, [0]), Piece(left, [0]), Piece(right, [0])]
+        cut = {"id": 0, "normal": [0.0, 0.0, 1.0], "offset": 0.0}
+        ids = {id(piece): number for number, piece in enumerate(pieces, start=1)}
+        faces = cut_faces(pieces, [cut])
+        pairs = sorted((ids[id(face["piece"])], ids[id(face["mate"])]) for face in faces)
+        self.assertEqual(pairs, [(1, 2), (1, 3), (2, 1), (3, 1)])
+        labeled, short, missing = label_joints(faces, ids, log=lambda *_: None)
+        self.assertEqual((labeled, short, missing), (4, [], []))
+
+    def test_small_face_falls_back_to_own_number(self):
+        from krackup.labels import cut_faces, label_joints
+        from krackup.split import Piece
+
+        # 20 x 20 has room for "12" at 5 mm but not "12-34".
+        post = mf.Manifold.cube((20, 20, 60), center=True)
+        top, bottom = post.split_by_plane([0.0, 0.0, 1.0], 0.0)
+        pieces = [Piece(top, [0]), Piece(bottom, [0])]
+        cut = {"id": 0, "normal": [0.0, 0.0, 1.0], "offset": 0.0}
+        ids = {id(pieces[0]): 12, id(pieces[1]): 34}
+        labeled, short, missing = label_joints(cut_faces(pieces, [cut]), ids, log=lambda *_: None)
+        self.assertEqual(labeled, 0)
+        self.assertEqual(sorted(short), [[12, 34], [34, 12]])
+        self.assertEqual(missing, [])
 
 
 class OrientTest(unittest.TestCase):

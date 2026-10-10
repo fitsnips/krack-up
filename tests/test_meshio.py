@@ -153,6 +153,31 @@ class ThreeMfTest(unittest.TestCase):
             self.assertGreaterEqual(right_start - left_end, 9.99)
 
 
+class CutIdTest(unittest.TestCase):
+    def test_bambu_cut_ids_follow_build_order(self):
+        model = (
+            f'<model unit="millimeter" xmlns="{CORE}"><resources>'
+            + _mesh_xml(5, mf.Manifold.cube((10, 10, 10)))
+            + _mesh_xml(9, mf.Manifold.cube((10, 10, 10)).translate((30, 0, 0)))
+            + _mesh_xml(3, mf.Manifold.cube((10, 10, 10)).translate((60, 0, 0)))
+            + '</resources><build><item objectid="5"/><item objectid="9"/><item objectid="3"/></build></model>'
+        )
+        cut = (
+            '<?xml version="1.0"?><objects>'
+            '<object id="1"><cut_id id="42" check_sum="2" connectors_cnt="0"/></object>'
+            '<object id="2"><cut_id id="0" check_sum="1" connectors_cnt="0"/></object>'
+            '<object id="3"><cut_id id="42" check_sum="2" connectors_cnt="0"/></object>'
+            "</objects>"
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "cut.3mf"
+            _write_3mf(path, model, {"Metadata/cut_information.xml": cut})
+            loaded = load_models(path)
+        self.assertEqual([model.cut_id for model in loaded], [42, 0, 42])
+        name, verts, faces = loaded[0]
+        self.assertEqual(len(faces), 12)
+
+
 class StlTest(unittest.TestCase):
     def test_binary_stl_with_solid_header(self):
         verts, faces = _arrays(mf.Manifold.cube((10, 10, 10)))

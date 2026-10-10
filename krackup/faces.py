@@ -2,7 +2,9 @@
 
 A project like the Jimmy file is already split into objects, and some of
 those joints have no dowel, or only one. Two faces count as a joint only when
-they sit on different objects of the file and have the same outline. Faces
+they sit on different objects of the file and have the same outline. When
+Bambu's cut_information.xml says two objects are halves of one cut, their
+faces are paired before any other. Faces
 that krack-up cut itself are left alone because `add_dowels` pinned them, and
 so are outside walls with no partner.
 
@@ -32,10 +34,12 @@ TIE = 0.015
 ROUND = 8
 
 
-def pin_existing_faces(pieces, length, tolerance, pitch, min_pins, log=print):
+def pin_existing_faces(pieces, length, tolerance, pitch, min_pins, log=print, scale=1.0):
+    """`scale` is how much the model was scaled, so connectors in the file
+    (sized for the unscaled model) are still recognised."""
     faces = []
     for piece in pieces:
-        faces.extend(_cut_faces(piece))
+        faces.extend(_cut_faces(piece, scale))
     pairs = _match(faces)
     pins = []
     for number, (face_a, face_b, fit) in enumerate(pairs):
@@ -45,10 +49,10 @@ def pin_existing_faces(pieces, length, tolerance, pitch, min_pins, log=print):
     if pins:
         failed = _carve(pieces, pins, log)
         pins = [pin for pin in pins if id(pin) not in failed]
-    return pins
+    return pins, [(face_a, face_b) for face_a, face_b, _ in pairs]
 
 
-def _cut_faces(piece):
+def _cut_faces(piece, scale=1.0):
     verts, faces = mesh_arrays(piece.solid)
     if len(faces) == 0:
         return []
@@ -67,7 +71,7 @@ def _cut_faces(piece):
                 "area": patch["area"],
                 "normal": patch["normal"],
                 "offset": patch["offset"],
-                "existing": _existing_pins(patch, patches),
+                "existing": _existing_pins(patch, patches, scale),
             }
         )
     return cuts
@@ -184,17 +188,17 @@ def _thin_wall(patch, patches):
     return False
 
 
-def _existing_pins(patch, patches):
+def _existing_pins(patch, patches, scale=1.0):
     """Sockets (a pocket floor) and pegs (a flat top) already on this face."""
     found = []
     frame = plane_frame(patch["normal"])
     for other in patches:
-        if other is patch or not (40 <= other["area"] <= 500):
+        if other is patch or not (40 * scale**2 <= other["area"] <= 500 * scale**2):
             continue
         if float(np.dot(patch["normal"], other["normal"])) < 0.9:
             continue
         step = abs(float(np.dot(patch["centroid"] - other["centroid"], patch["normal"])))
-        if not 2.5 <= step <= 12:
+        if not 2.5 * scale <= step <= 12 * scale:
             continue
         local = frame @ other["centroid"]
         found.append((float(local[0]), float(local[1])))
@@ -226,11 +230,13 @@ def _match(faces):
                 continue
             fit = _align(shape_a, shape_b)
             if fit["score"] >= MATCH_IOU:
-                scored.append((fit["score"], face_a, face_b, fit))
-    scored.sort(key=lambda item: item[0], reverse=True)
+                scored.append((_same_cut(face_a, face_b), fit["score"], face_a, face_b, fit))
+    # The two halves of one Bambu cut take their faces first, so a look-alike
+    # face elsewhere cannot claim them.
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     used = set()
     pairs = []
-    for _, face_a, face_b, fit in scored:
+    for _, _, face_a, face_b, fit in scored:
         if id(face_a) in used or id(face_b) in used:
             continue
         used.add(id(face_a))
@@ -239,6 +245,11 @@ def _match(faces):
         face_b["shape"] = shapes[id(face_b)]
         pairs.append((face_a, face_b, fit))
     return pairs
+
+
+def _same_cut(face_a, face_b):
+    cut_a = getattr(face_a["piece"], "cut_id", 0)
+    return bool(cut_a) and cut_a == getattr(face_b["piece"], "cut_id", 0)
 
 
 def _shape(face):

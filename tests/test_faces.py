@@ -65,7 +65,7 @@ def _prism(outline, height):
 class FileJointTest(unittest.TestCase):
     def _run(self, a, b, min_pins=2, pitch=100.0):
         log = []
-        pins = pin_existing_faces([a, b], 10.0, 0.1, pitch, min_pins, log=log.append)
+        pins, _ = pin_existing_faces([a, b], 10.0, 0.1, pitch, min_pins, log=log.append)
         return pins, log
 
     def assertSocketsLineUp(self, pins, rotation, shift):
@@ -144,3 +144,39 @@ class FileJointTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SameCutTest(unittest.TestCase):
+    def test_halves_of_one_bambu_cut_pair_first(self):
+        from krackup import faces
+
+        class Fake:
+            def __init__(self, origin, cut_id):
+                self.origin = origin
+                self.cut_id = cut_id
+
+        a, b, c = Fake(0, 7), Fake(1, 7), Fake(2, 9)
+        face = {name: {"piece": piece, "area": 1000.0} for name, piece in zip("abc", (a, b, c))}
+        scores = {frozenset("bc"): 0.95, frozenset("ab"): 0.85, frozenset("ac"): 0.85}
+        name_of = {id(f): n for n, f in face.items()}
+        real_shape, real_align = faces._shape, faces._align
+        faces._shape = lambda f: {"name": name_of[id(f)]}
+        faces._align = lambda sa, sb: {"score": scores[frozenset((sa["name"], sb["name"]))]}
+        self.addCleanup(setattr, faces, "_shape", real_shape)
+        self.addCleanup(setattr, faces, "_align", real_align)
+        pairs = faces._match([face["a"], face["b"], face["c"]])
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual({name_of[id(pairs[0][0])], name_of[id(pairs[0][1])]}, {"a", "b"})
+
+
+class ScaledConnectorTest(unittest.TestCase):
+    def test_connector_found_after_scaling_the_model(self):
+        from krackup.faces import _cut_faces
+
+        # A 15 mm deep socket: a 10 mm Bambu connector after scaling by 1.5.
+        block = mf.Manifold.cube((120, 120, 60), center=True)
+        socket = mf.Manifold.cylinder(16, 11.0, 11.0, 48).translate((0, 0, 15))
+        piece = Piece(block - socket, [])
+        top = lambda faces: max(faces, key=lambda f: f["normal"][2])
+        self.assertEqual(top(_cut_faces(piece))["existing"], [])
+        self.assertEqual(len(top(_cut_faces(piece, scale=1.5))["existing"]), 1)
