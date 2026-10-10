@@ -8,7 +8,7 @@ import numpy as np
 
 from krackup.bambu import project_settings, spacing, write_project as write_bambu_project
 from krackup.faces import pin_existing_faces
-from krackup.labels import DEPTH, label_parts
+from krackup.labels import DEPTH, cut_faces, file_faces, label_joints
 from krackup.meshio import load_models, write_3mf, write_stl
 from krackup.orient import place
 from krackup.pins import RADII, add_dowels, dowel_solid
@@ -78,7 +78,8 @@ def krack(
 
     all_pins = []
     pending = []
-    for origin, (source_name, verts, faces) in enumerate(load_models(path)):
+    for origin, model in enumerate(load_models(path)):
+        source_name, verts, faces = model
         emit(f"\n{source_name}")
         verts = scale_vertices(verts, scale)
         solid = manifold_from(verts, faces)
@@ -87,21 +88,21 @@ def krack(
         for piece in pieces:
             piece.source = source_name
             piece.origin = origin
+            piece.cut_id = model.cut_id
             piece.planes = [(cuts[i]["normal"], cuts[i]["offset"]) for i in piece.cuts]
         pending.append((source_name, pieces, cuts, pins, areas))
         all_pins.extend(pins)
 
     every_piece = [piece for _, pieces, _, _, _ in pending for piece in pieces]
     file_pins = []
+    file_faces_matched = []
     if len({piece.origin for piece in every_piece}) > 1:
         emit("checking cut faces that came in with the file")
-        file_pins = pin_existing_faces(every_piece, length, tolerance, pitch, min_pins, log=emit)
+        file_pins, file_faces_matched = pin_existing_faces(
+            every_piece, length, tolerance, pitch, min_pins, log=emit, scale=scale
+        )
         all_pins.extend(file_pins)
 
-    holes_by_piece = {}
-    for pin in all_pins:
-        for hole in pin["holes"]:
-            holes_by_piece.setdefault(id(hole["piece"]), []).append(hole)
     records = []
     part_index = 1
     for source_name, pieces, cuts, _, _ in pending:
@@ -110,7 +111,6 @@ def krack(
                 "source": source_name,
                 "piece": piece,
                 "cuts": [cuts[i] for i in piece.cuts],
-                "holes": holes_by_piece.get(id(piece), []),
                 "centroid": _centroid(piece.solid),
             }
             for piece in pieces
@@ -123,6 +123,23 @@ def krack(
         records.extend(group)
     id_by_piece = {id(rec["piece"]): rec["id"] for rec in records}
 
+    label_report = {"faces": 0, "short": [], "missing": [], "no_joint": [], "unmatched_cuts": []}
+    if labels and len(records) > 1:
+        emit("engraving joint labels")
+        faces = file_faces(file_faces_matched)
+        for _, pieces, cuts, _, _ in pending:
+            faces.extend(cut_faces(pieces, cuts))
+        labeled, short, missing = label_joints(faces, id_by_piece, log=emit)
+        joined = {id(face["piece"]) for face in faces}
+        label_report = {
+            "faces": labeled,
+            "short": short,
+            "missing": missing,
+            "no_joint": [rec["id"] for rec in records if id(rec["piece"]) not in joined],
+            "unmatched_cuts": _unmatched_cuts(every_piece, file_faces_matched),
+        }
+        for names in label_report["unmatched_cuts"]:
+            emit(f"warning: {' and '.join(names)} are one Bambu cut but their faces were not matched")
     for rec in records:
         piece = rec["piece"]
         posed = place(piece.solid, [cut["normal"] for cut in rec["cuts"]], limit)
@@ -130,16 +147,6 @@ def krack(
             size = piece.solid.bounding_box()
             raise KrackError(f"a piece of {rec['source']} does not fit: {size}")
         rec["posed"] = posed
-    unlabeled = []
-    if labels and len(records) > 1:
-        emit("engraving part numbers")
-        # Pose first, so the number can go on a face that is not on the bed.
-        unlabeled = label_parts(records, log=emit)
-        for rec in records:
-            normals = [cut["normal"] for cut in rec["cuts"]]
-            posed = place(rec["piece"].solid, normals, limit, only=rec["posed"]["name"])
-            if posed is not None:
-                rec["posed"] = posed
 
     all_joints = []
     for source_name, _, cuts, pins, areas in pending:
@@ -226,7 +233,11 @@ def krack(
         "labels": {
             "engraved": bool(labels and len(records) > 1),
             "depth_mm": DEPTH,
-            "unlabeled_parts": unlabeled,
+            "labeled_faces": label_report["faces"],
+            "number_only": label_report["short"],
+            "unlabeled_faces": label_report["missing"],
+            "parts_without_joints": label_report["no_joint"],
+            "unmatched_bambu_cuts": label_report["unmatched_cuts"],
         },
         "dowel": {
             "shape": "pentagon",
@@ -274,15 +285,44 @@ def _plates(count):
     return f"{count} plate" if count == 1 else f"{count} plates"
 
 
+def _unmatched_cuts(pieces, matched):
+    """Bambu cut halves whose faces were not paired, as [name, name] lists."""
+    halves = {}
+    for piece in pieces:
+        if getattr(piece, "cut_id", 0):
+            halves.setdefault(piece.cut_id, set()).add(piece.source)
+    paired = {
+        face_a["piece"].cut_id
+        for face_a, face_b in matched
+        if getattr(face_a["piece"], "cut_id", 0) and face_a["piece"].cut_id == getattr(face_b["piece"], "cut_id", 0)
+    }
+    return [sorted(names) for cut_id, names in sorted(halves.items()) if cut_id not in paired and len(names) > 1]
+
+
 def _label_lines(labels):
     if not labels["engraved"]:
         return []
     lines = [
-        f"Each part number is engraved {labels['depth_mm']:g} mm deep on one of its "
-        "joint faces, with a bar under the digits.",
+        f"Every joint face is engraved {labels['depth_mm']:g} mm deep with its part number "
+        "and the part it meets: 3-5 is on part 3, where it meets part 5. "
+        "The bar under the digits marks the bottom.",
     ]
-    if labels["unlabeled_parts"]:
-        lines.append(f"No room for a number on parts {labels['unlabeled_parts']}.")
+    if labels["number_only"]:
+        pairs = ", ".join(f"{own}-{mate}" for own, mate in labels["number_only"])
+        lines.append(f"Too small for both numbers, so only the part's own number: {pairs}.")
+    if labels["unlabeled_faces"]:
+        pairs = ", ".join(f"{own}-{mate}" for own, mate in labels["unlabeled_faces"])
+        lines.append(f"No room for any label on these joint faces: {pairs}.")
+    for names in labels["unmatched_bambu_cuts"]:
+        lines.append(
+            f"{' and '.join(names)} are the two halves of one Bambu cut, but their faces were "
+            "not matched (usually because krack-up cut one of them again), so that joint has "
+            "no label and no added dowels. Bambu's own connectors are still there."
+        )
+    if labels["parts_without_joints"]:
+        lines.append(
+            f"Parts {labels['parts_without_joints']} have no joint face, so they are not labeled."
+        )
     return lines
 
 

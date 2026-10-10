@@ -10,13 +10,10 @@ OVERHANG = 45.0
 QUARTER_TURN = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
 
-def place(solid, normals, limit, only=None):
-    """Best pose, or the pose named `only` when the caller already chose it."""
+def place(solid, normals, limit):
     verts, faces = mesh_arrays(solid)
     best = None
     for name, frame in orientations_for(normals):
-        if only is not None and name != only:
-            continue
         rotated = verts @ frame.T
         size = rotated.max(axis=0) - rotated.min(axis=0)
         if not fits(size, limit):

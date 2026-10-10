@@ -85,7 +85,7 @@ def main(argv=None):
         "--no-labels",
         dest="labels",
         action="store_false",
-        help="do not engrave part numbers on the joint faces",
+        help="do not engrave part and mate numbers on the joint faces",
     )
     parser.add_argument("--3mf", action="store_true", help="also write project.3mf with every part and dowel packed onto plates")
     parser.add_argument("--info", action="store_true", help="print part sizes and exit")

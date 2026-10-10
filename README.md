@@ -10,11 +10,11 @@ The defaults come from `JM-UPDATED_-_JIMMY_FULL_PRINT_3MF_PENTAGON_DOWELS.3mf`, 
 - circumradius 10, 7.5, or 5 mm, largest that fits the joint
 - 0.1 mm clearance in the hole
 - one dowel every 100 mm across each cut face, and at least two dowels on every cut face
-- joints between objects that were already cut apart in a 3MF get the same rule; faces that already have enough dowels are left alone. A joint is found by matching outlines, so two identical flat faces on different objects can be mistaken for one
+- joints between objects that were already cut apart in a 3MF get the same rule; faces that already have enough dowels are left alone. Halves of one Bambu cut (from `cut_information.xml`) are paired first; other joints are found by matching outlines, so two identical flat faces on different objects can be mistaken for one
 - Bambu negative parts (cut connector sockets) are cut out of their object; modifier parts are ignored
 - scale the model about its center before cutting (`--scale`, default 1)
 - each piece turned so the flat joint is on the bed when that needs less support
-- each part number engraved 0.6 mm deep on one of its joint faces, hidden once glued; `--no-labels` turns it off
+- every joint face engraved 0.6 mm deep with its part number and the part it meets (`3-5` on part 3 where it meets part 5), hidden once glued; a small face gets only its own number. `--no-labels` turns it off
 
 ```bash
 python3 -m venv .venv

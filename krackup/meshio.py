@@ -61,12 +61,24 @@ def write_stl(path, verts, faces):
         handle.write(record.tobytes())
 
 
+class Model(tuple):
+    """(name, vertices, faces). `cut_id` is Bambu's cut id, 0 when not from a cut.
+
+    Two objects with the same nonzero cut id are the halves of one cut.
+    """
+
+    def __new__(cls, name, verts, faces, cut_id=0):
+        model = super().__new__(cls, (name, verts, faces))
+        model.cut_id = cut_id
+        return model
+
+
 def load_models(path):
-    """Return a list of (name, vertices, faces) in millimeters."""
+    """Return a list of Model (name, vertices, faces) in millimeters."""
     path = Path(path)
     if path.suffix.lower() == ".stl":
         verts, faces = read_stl(path)
-        return [(path.stem, verts, faces)]
+        return [Model(path.stem, verts, faces)]
     if path.suffix.lower() == ".3mf":
         return _load_3mf(path)
     raise KrackError(f"unsupported file type: {path.suffix}")
@@ -186,8 +198,9 @@ def _load_3mf(path):
         root = _ensure_model(archive, models, root_path)
         names = _object_names(archive)
         subtypes = _part_subtypes(archive)
+        cut_ids = _cut_ids(archive)
         loaded = []
-        for item in root["build"]:
+        for number, item in enumerate(root["build"], start=1):
             chunks = _resolve(
                 archive, models, root_path, item["id"], item["transform"],
                 kinds=subtypes.get(item["id"], {}),
@@ -196,7 +209,8 @@ def _load_3mf(path):
             if len(faces) == 0:
                 continue
             verts = verts * root["scale"]
-            loaded.append((names.get(item["id"]) or item["name"] or f"object_{item['id']}", verts, faces))
+            name = names.get(item["id"]) or item["name"] or f"object_{item['id']}"
+            loaded.append(Model(name, verts, faces, cut_ids.get(number, 0)))
     if not loaded:
         raise KrackError(f"no meshes found in {path}")
     return loaded
@@ -420,6 +434,30 @@ def _object_names(archive):
                 names[int(obj.attrib["id"])] = meta.attrib.get("value", "")
                 break
     return names
+
+
+def _cut_ids(archive):
+    """Bambu's Metadata/cut_information.xml numbers objects by build order, from 1.
+
+    Returns {build position: cut id}.
+    """
+    if "Metadata/cut_information.xml" not in archive.namelist():
+        return {}
+    try:
+        root = ET.fromstring(archive.read("Metadata/cut_information.xml"))
+    except ET.ParseError:
+        return {}
+    found = {}
+    for obj in root:
+        if _tag(obj) != "object" or "id" not in obj.attrib:
+            continue
+        for child in obj:
+            if _tag(child) == "cut_id":
+                try:
+                    found[int(obj.attrib["id"])] = int(child.attrib.get("id", 0))
+                except ValueError:
+                    pass
+    return found
 
 
 def _part_subtypes(archive):
